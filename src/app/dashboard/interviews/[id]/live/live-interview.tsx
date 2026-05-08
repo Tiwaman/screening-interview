@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useTts } from "@/lib/use-tts";
 
 type Question = {
   id: string;
@@ -53,6 +54,9 @@ export function LiveInterview({
   const [suggesting, setSuggesting] = useState(false);
   const [skippedFor, setSkippedFor] = useState<Set<string>>(new Set());
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState(false);
+  const tts = useTts();
+  const lastSpokenIdRef = useRef<string | null>(null);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -71,7 +75,18 @@ export function LiveInterview({
     currentQuestionIdRef.current = current?.id ?? null;
     // Clear any stale suggestion when question changes.
     setSuggestion(null);
-  }, [current]);
+    // Auto-speak the new question when toggle is on.
+    if (
+      autoSpeak &&
+      tts.supported &&
+      current &&
+      current.id !== lastSpokenIdRef.current
+    ) {
+      lastSpokenIdRef.current = current.id;
+      tts.speak(current.prompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current, autoSpeak]);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -428,7 +443,31 @@ export function LiveInterview({
             {current.prompt}
           </p>
 
-          <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            {tts.supported && (
+              <>
+                <button
+                  type="button"
+                  onClick={() =>
+                    tts.state === "speaking"
+                      ? tts.stop()
+                      : tts.speak(current.prompt)
+                  }
+                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                >
+                  {tts.state === "speaking" ? "■ Stop voice" : "🔊 Ask aloud"}
+                </button>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-600 dark:text-zinc-400">
+                  <input
+                    type="checkbox"
+                    checked={autoSpeak}
+                    onChange={(e) => setAutoSpeak(e.target.checked)}
+                    className="rounded"
+                  />
+                  Auto-speak on Next
+                </label>
+              </>
+            )}
             <button
               type="button"
               onClick={handlePrev}
