@@ -64,7 +64,11 @@ export function LiveInterview({
   }, []);
 
   async function uploadChunk(blob: Blob) {
-    if (blob.size < 4_000) return;
+    console.log("[stt] chunk", blob.size, "bytes", blob.type);
+    if (blob.size < 1_000) {
+      console.warn("[stt] chunk too small, skipping");
+      return;
+    }
     const fd = new FormData();
     fd.set("audio", blob, "chunk.webm");
     fd.set("interview_id", interviewId);
@@ -119,12 +123,28 @@ export function LiveInterview({
       const source = ctx.createMediaStreamSource(audioStream);
       source.connect(ctx.destination);
 
+      console.log(
+        "[stt] audio tracks:",
+        audioTracks.map((t) => ({
+          label: t.label,
+          enabled: t.enabled,
+          muted: t.muted,
+          settings: t.getSettings(),
+        })),
+      );
+
       const recorder = new MediaRecorder(audioStream, {
         mimeType: "audio/webm;codecs=opus",
       });
       recorder.ondataavailable = (event) => {
+        console.log(
+          "[stt] dataavailable fired, size:",
+          event.data?.size ?? 0,
+        );
         if (event.data && event.data.size > 0) void uploadChunk(event.data);
       };
+      recorder.onstart = () => console.log("[stt] recorder started");
+      recorder.onerror = (e) => console.error("[stt] recorder error", e);
       recorder.onstop = () => {
         setRecording(false);
       };
