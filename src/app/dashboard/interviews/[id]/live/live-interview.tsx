@@ -42,6 +42,8 @@ export function LiveInterview({
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stoppingRef = useRef(false);
   const currentQuestionIdRef = useRef<string | null>(
     questions[0]?.id ?? null,
   );
@@ -137,31 +139,16 @@ export function LiveInterview({
         })),
       );
 
-      const recorder = new MediaRecorder(audioStream, {
-        mimeType: "audio/webm;codecs=opus",
-      });
-      recorder.ondataavailable = (event) => {
-        console.log(
-          "[stt] dataavailable fired, size:",
-          event.data?.size ?? 0,
-        );
-        if (event.data && event.data.size > 0) void uploadChunk(event.data);
-      };
-      recorder.onstart = () => console.log("[stt] recorder started");
-      recorder.onerror = (e) => console.error("[stt] recorder error", e);
-      recorder.onstop = () => {
-        setRecording(false);
-      };
-      recorder.start(CHUNK_MS);
+      streamRef.current = audioStream;
+      stoppingRef.current = false;
 
       // If the user stops sharing via Chrome's UI, our tracks end.
       audioTracks.forEach((track) => {
         track.onended = () => stopCapture();
       });
 
-      streamRef.current = audioStream;
-      recorderRef.current = recorder;
       setRecording(true);
+      startChunkCycle();
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to start screen share",
@@ -171,7 +158,42 @@ export function LiveInterview({
     }
   }
 
+  function startChunkCycle() {
+    const stream = streamRef.current;
+    if (!stream || stoppingRef.current) return;
+
+    const blobs: Blob[] = [];
+    const recorder = new MediaRecorder(stream, {
+      mimeType: "audio/webm;codecs=opus",
+    });
+    recorderRef.current = recorder;
+
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) blobs.push(event.data);
+    };
+    recorder.onerror = (e) => console.error("[stt] recorder error", e);
+    recorder.onstop = () => {
+      const blob = new Blob(blobs, { type: "audio/webm;codecs=opus" });
+      console.log("[stt] chunk complete, size:", blob.size);
+      if (blob.size > 0) void uploadChunk(blob);
+      // Schedule next cycle if still recording.
+      if (!stoppingRef.current) startChunkCycle();
+    };
+
+    recorder.start();
+    chunkTimerRef.current = setTimeout(() => {
+      if (recorder.state === "recording") recorder.stop();
+    }, CHUNK_MS);
+  }
+
   function stopCapture() {
+    stoppingRef.current = true;
+
+    if (chunkTimerRef.current) {
+      clearTimeout(chunkTimerRef.current);
+      chunkTimerRef.current = null;
+    }
+
     const recorder = recorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
