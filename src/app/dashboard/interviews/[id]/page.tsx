@@ -52,13 +52,25 @@ export default async function InterviewDetailPage({
         >
           ← Back to interviews
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {interview.role_title}
-        </h1>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          {SENIORITY_LABELS[interview.seniority as Seniority]} · status{" "}
-          <span className="font-medium">{interview.status}</span>
-        </p>
+        <div className="flex items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {interview.role_title}
+            </h1>
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              {SENIORITY_LABELS[interview.seniority as Seniority]} · status{" "}
+              <span className="font-medium">{interview.status}</span>
+            </p>
+          </div>
+          {questions.length > 0 && (
+            <Link
+              href={`/dashboard/interviews/${id}/live`}
+              className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+            >
+              ▶ Start live interview
+            </Link>
+          )}
+        </div>
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
