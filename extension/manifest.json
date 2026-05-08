@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Screening Interview",
+  "version": "0.1.0",
+  "description": "AI-driven screening interview agent for any web meeting tool.",
+  "action": {
+    "default_title": "Open Screening Interview"
+  },
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "index.html"
+  },
+  "permissions": ["sidePanel", "storage", "activeTab", "tabCapture"],
+  "host_permissions": [
+    "https://screening-interview.vercel.app/*",
+    "http://localhost:3000/*"
+  ]
+}

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 
@@ -25,6 +26,12 @@ export default async function DashboardLayout({
             </span>
           </div>
           <div className="flex items-center gap-3">
+            <Link
+              href="/dashboard/extension"
+              className="text-xs text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
+            >
+              Extension
+            </Link>
             <span className="text-xs text-zinc-500 dark:text-zinc-400">
               {user.email}
             </span>
