@@ -19,6 +19,8 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 const CHUNK_MS = 3000;
+const SILENCE_TRIGGER_MS = 6000; // after this much idle since last chunk, suggest a follow-up
+const MIN_ANSWER_LEN = 30; // skip follow-up suggestion if answer is too short
 
 type ChunkEntry = {
   text: string;
@@ -26,32 +28,46 @@ type ChunkEntry = {
   receivedAt: number;
 };
 
+type Suggestion = {
+  prompt: string;
+  reason: string;
+  forQuestionId: string;
+};
+
 export function LiveInterview({
   interviewId,
-  questions,
+  questions: initialQuestions,
 }: {
   interviewId: string;
   questions: Question[];
 }) {
+  const [questions, setQuestions] = useState<Question[]>(initialQuestions);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [recording, setRecording] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chunks, setChunks] = useState<ChunkEntry[]>([]);
+  const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
+  const [skippedFor, setSkippedFor] = useState<Set<string>>(new Set());
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stoppingRef = useRef(false);
   const currentQuestionIdRef = useRef<string | null>(
-    questions[0]?.id ?? null,
+    initialQuestions[0]?.id ?? null,
   );
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+  const lastEvaluatedAnswerRef = useRef<Record<string, string>>({});
 
   const current = questions[currentIdx];
   useEffect(() => {
     currentQuestionIdRef.current = current?.id ?? null;
+    // Clear any stale suggestion when question changes.
+    setSuggestion(null);
   }, [current]);
 
   useEffect(() => {
@@ -65,12 +81,123 @@ export function LiveInterview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function uploadChunk(blob: Blob) {
-    console.log("[stt] chunk", blob.size, "bytes", blob.type);
-    if (blob.size < 1_000) {
-      console.warn("[stt] chunk too small, skipping");
-      return;
+  // Restart silence timer whenever a chunk arrives for the current question.
+  useEffect(() => {
+    if (!recording || !current) return;
+    const lastChunk = chunks[chunks.length - 1];
+    if (!lastChunk || lastChunk.questionId !== current.id) return;
+
+    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    silenceTimerRef.current = setTimeout(() => {
+      void maybeSuggestFollowup();
+    }, SILENCE_TRIGGER_MS);
+
+    return () => {
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chunks, recording, current]);
+
+  function answerForCurrent(): string {
+    if (!current) return "";
+    return chunks
+      .filter((c) => c.questionId === current.id)
+      .map((c) => c.text)
+      .join(" ")
+      .trim();
+  }
+
+  async function maybeSuggestFollowup(force = false) {
+    if (!current || suggesting) return;
+    if (suggestion && suggestion.forQuestionId === current.id) return;
+    if (skippedFor.has(current.id) && !force) return;
+
+    const answer = answerForCurrent();
+    if (answer.length < MIN_ANSWER_LEN) return;
+    if (lastEvaluatedAnswerRef.current[current.id] === answer && !force) return;
+
+    setSuggesting(true);
+    lastEvaluatedAnswerRef.current[current.id] = answer;
+    try {
+      const res = await fetch("/api/followup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interviewId,
+          questionId: current.id,
+          answer,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        console.warn("[followup] error", res.status, body);
+        return;
+      }
+      const data = (await res.json()) as {
+        askFollowup: boolean;
+        prompt: string | null;
+        reason: string;
+      };
+      if (data.askFollowup && data.prompt) {
+        setSuggestion({
+          prompt: data.prompt,
+          reason: data.reason,
+          forQuestionId: current.id,
+        });
+      }
+    } catch (err) {
+      console.warn("[followup] failed", err);
+    } finally {
+      setSuggesting(false);
     }
+  }
+
+  async function acceptSuggestion() {
+    if (!suggestion || !current) return;
+    const parentId = suggestion.forQuestionId;
+    const promptText = suggestion.prompt;
+    setSuggestion(null);
+    try {
+      const res = await fetch("/api/followup/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interviewId,
+          parentQuestionId: parentId,
+          prompt: promptText,
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        setError(`Follow-up insert ${res.status}: ${body}`);
+        return;
+      }
+      const { question } = (await res.json()) as { question: Question };
+      // Insert immediately after the parent in the local array, then jump to it.
+      setQuestions((prev) => {
+        const parentIdx = prev.findIndex((q) => q.id === parentId);
+        if (parentIdx === -1) return [...prev, question];
+        const next = [...prev];
+        next.splice(parentIdx + 1, 0, question);
+        return next;
+      });
+      setCurrentIdx((idx) => {
+        const parentIdx = questions.findIndex((q) => q.id === parentId);
+        return parentIdx === -1 ? idx : parentIdx + 1;
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Follow-up insert failed");
+    }
+  }
+
+  function skipSuggestion() {
+    if (!suggestion) return;
+    setSkippedFor((prev) => new Set(prev).add(suggestion.forQuestionId));
+    setSuggestion(null);
+  }
+
+  async function uploadChunk(blob: Blob) {
+    if (blob.size < 1_000) return;
     const fd = new FormData();
     fd.set("audio", blob, "chunk.webm");
     fd.set("interview_id", interviewId);
@@ -119,30 +246,17 @@ export function LiveInterview({
           "No audio track shared. When the picker appears, choose a tab and check 'Share tab audio'.",
         );
       }
-      // Drop video tracks — we only need audio.
       stream.getVideoTracks().forEach((t) => t.stop());
       const audioStream = new MediaStream(audioTracks);
 
-      // Pipe audio back to speakers so the interviewer can still hear.
       const ctx = new AudioContext();
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(audioStream);
       source.connect(ctx.destination);
 
-      console.log(
-        "[stt] audio tracks:",
-        audioTracks.map((t) => ({
-          label: t.label,
-          enabled: t.enabled,
-          muted: t.muted,
-          settings: t.getSettings(),
-        })),
-      );
-
       streamRef.current = audioStream;
       stoppingRef.current = false;
 
-      // If the user stops sharing via Chrome's UI, our tracks end.
       audioTracks.forEach((track) => {
         track.onended = () => stopCapture();
       });
@@ -174,9 +288,7 @@ export function LiveInterview({
     recorder.onerror = (e) => console.error("[stt] recorder error", e);
     recorder.onstop = () => {
       const blob = new Blob(blobs, { type: "audio/webm;codecs=opus" });
-      console.log("[stt] chunk complete, size:", blob.size);
       if (blob.size > 0) void uploadChunk(blob);
-      // Schedule next cycle if still recording.
       if (!stoppingRef.current) startChunkCycle();
     };
 
@@ -192,6 +304,10 @@ export function LiveInterview({
     if (chunkTimerRef.current) {
       clearTimeout(chunkTimerRef.current);
       chunkTimerRef.current = null;
+    }
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
     }
 
     const recorder = recorderRef.current;
@@ -230,6 +346,7 @@ export function LiveInterview({
     (c) => current && c.questionId === current.id,
   );
   const transcriptText = currentChunks.map((c) => c.text).join(" ");
+  const answerLen = transcriptText.length;
 
   return (
     <div className="space-y-5">
@@ -257,8 +374,8 @@ export function LiveInterview({
               before clicking Share.
             </li>
             <li>
-              Audio is captured locally, transcribed by the AI, and shown live
-              below.
+              Audio is captured locally, transcribed, and the agent suggests
+              follow-ups in real time.
             </li>
           </ol>
           <button
@@ -303,6 +420,14 @@ export function LiveInterview({
             >
               Next ›
             </button>
+            <button
+              type="button"
+              disabled={suggesting || answerLen < MIN_ANSWER_LEN}
+              onClick={() => void maybeSuggestFollowup(true)}
+              className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+            >
+              {suggesting ? "Thinking…" : "Suggest follow-up"}
+            </button>
             {recording && (
               <button
                 type="button"
@@ -312,6 +437,42 @@ export function LiveInterview({
                 ■ Stop
               </button>
             )}
+          </div>
+        </div>
+      )}
+
+      {suggestion && current && suggestion.forQuestionId === current.id && (
+        <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1.5">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
+                Suggested follow-up
+              </p>
+              <p className="text-sm leading-relaxed text-zinc-900 dark:text-zinc-50">
+                {suggestion.prompt}
+              </p>
+              {suggestion.reason && (
+                <p className="text-[11px] italic text-amber-800 dark:text-amber-300">
+                  {suggestion.reason}
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <button
+              type="button"
+              onClick={acceptSuggestion}
+              className="rounded-md bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-amber-700"
+            >
+              Ask this →
+            </button>
+            <button
+              type="button"
+              onClick={skipSuggestion}
+              className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-50 dark:border-amber-700 dark:bg-zinc-950 dark:text-amber-300 dark:hover:bg-zinc-900"
+            >
+              Skip
+            </button>
           </div>
         </div>
       )}
