@@ -18,7 +18,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   followup: "Follow-up",
 };
 
-const CHUNK_MS = 3000;
+const CHUNK_MS = 5000;
 
 type ChunkEntry = {
   text: string;
@@ -84,14 +84,18 @@ export function LiveInterview({
       }
       const data = (await res.json()) as { transcript?: string };
       if (data.transcript) {
-        setChunks((prev) => [
-          ...prev,
-          {
-            text: data.transcript!,
-            questionId: currentQuestionIdRef.current,
-            receivedAt: Date.now(),
-          },
-        ]);
+        setChunks((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.text === data.transcript) return prev;
+          return [
+            ...prev,
+            {
+              text: data.transcript!,
+              questionId: currentQuestionIdRef.current,
+              receivedAt: Date.now(),
+            },
+          ];
+        });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "STT request failed");

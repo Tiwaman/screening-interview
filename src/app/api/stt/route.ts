@@ -54,7 +54,14 @@ export async function POST(request: Request) {
           parts: [
             { inlineData: { mimeType, data: base64 } },
             {
-              text: "Transcribe this audio verbatim. Return only the spoken text — no preamble, no labels, no quotes. If silent or unintelligible, return an empty string.",
+              text: [
+                "You are a strict speech-to-text engine. Transcribe the audio EXACTLY as spoken — no paraphrasing, no completion, no hallucination.",
+                "Rules:",
+                "- If the audio is silent, near-silent, music-only, or contains no clearly intelligible speech, return EXACTLY the empty string.",
+                "- Never invent or guess words to fill silence.",
+                "- Never repeat a phrase to pad output.",
+                "- Output only the transcribed words. No quotes, labels, prefixes, or commentary.",
+              ].join("\n"),
             },
           ],
         },
@@ -72,7 +79,23 @@ export async function POST(request: Request) {
     );
   }
 
+  // De-dupe: if this transcript is identical to the last chunk for the same
+  // interview/question, drop it. Catches Gemini's classic repeat-loop on
+  // short / silent chunks.
   if (transcript) {
+    const { data: lastChunk } = await supabase
+      .from("transcripts")
+      .select("content")
+      .eq("interview_id", interviewId)
+      .eq("speaker", speaker)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ content: string }>();
+
+    if (lastChunk?.content?.trim() === transcript) {
+      return NextResponse.json({ transcript: "" });
+    }
+
     await supabase.from("transcripts").insert({
       interview_id: interviewId,
       question_id: questionId,
