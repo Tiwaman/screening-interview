@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Question = {
   id: string;
@@ -41,6 +42,7 @@ export function LiveInterview({
   interviewId: string;
   questions: Question[];
 }) {
+  const router = useRouter();
   const [questions, setQuestions] = useState<Question[]>(initialQuestions);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [recording, setRecording] = useState(false);
@@ -50,6 +52,7 @@ export function LiveInterview({
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [suggesting, setSuggesting] = useState(false);
   const [skippedFor, setSkippedFor] = useState<Set<string>>(new Set());
+  const [generatingReport, setGeneratingReport] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -325,6 +328,27 @@ export function LiveInterview({
     setRecording(false);
   }
 
+  async function endAndGenerateReport() {
+    setError(null);
+    setGeneratingReport(true);
+    stopCapture();
+    try {
+      const res = await fetch("/api/reports/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interviewId }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`${res.status}: ${body || "Generation failed"}`);
+      }
+      router.push(`/dashboard/interviews/${interviewId}/report`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Report generation failed");
+      setGeneratingReport(false);
+    }
+  }
+
   function handleNext() {
     const next = currentIdx + 1;
     if (next >= questions.length) {
@@ -437,6 +461,14 @@ export function LiveInterview({
                 ■ Stop
               </button>
             )}
+            <button
+              type="button"
+              disabled={generatingReport}
+              onClick={endAndGenerateReport}
+              className="rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+            >
+              {generatingReport ? "Generating…" : "End & generate report"}
+            </button>
           </div>
         </div>
       )}
