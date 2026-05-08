@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   getToken,
   setToken,
@@ -16,7 +16,14 @@ import {
   moveQuestion,
   type InterviewSummary,
   type InterviewDetail,
+  type Question,
 } from "./lib/api";
+import {
+  startLiveCapture,
+  stopLiveCapture,
+  setLiveQuestion,
+  type LiveTranscriptChunk,
+} from "./lib/live";
 
 const SENIORITY_OPTIONS = [
   { value: "intern", label: "Intern" },
@@ -40,7 +47,8 @@ type View =
   | { kind: "needs-token" }
   | { kind: "list"; interviews: InterviewSummary[] }
   | { kind: "create" }
-  | { kind: "detail"; data: InterviewDetail };
+  | { kind: "detail"; data: InterviewDetail }
+  | { kind: "live"; data: InterviewDetail; currentIdx: number };
 
 export function App() {
   const [view, setView] = useState<View>({ kind: "loading" });
@@ -78,7 +86,11 @@ export function App() {
   async function refreshDetail(id: string) {
     try {
       const detail = await getInterview(id);
-      setView({ kind: "detail", data: detail });
+      setView((v) =>
+        v.kind === "detail" || v.kind === "live"
+          ? { ...v, data: detail }
+          : v,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Refresh failed");
     }
@@ -92,7 +104,11 @@ export function App() {
   return (
     <div className="flex h-full flex-col">
       <Header
-        canSignOut={view.kind === "list" || view.kind === "detail" || view.kind === "create"}
+        canSignOut={
+          view.kind === "list" ||
+          view.kind === "detail" ||
+          view.kind === "create"
+        }
         onSignOut={handleSignOut}
         onBack={
           view.kind === "detail" || view.kind === "create"
@@ -129,6 +145,22 @@ export function App() {
           <InterviewView
             data={view.data}
             onChange={() => refreshDetail(view.data.interview.id)}
+            onError={setError}
+            onStartLive={() =>
+              setView({ kind: "live", data: view.data, currentIdx: 0 })
+            }
+          />
+        )}
+        {view.kind === "live" && (
+          <LiveInterviewView
+            data={view.data}
+            currentIdx={view.currentIdx}
+            onChangeIdx={(idx) =>
+              setView((v) =>
+                v.kind === "live" ? { ...v, currentIdx: idx } : v,
+              )
+            }
+            onExit={() => setView({ kind: "detail", data: view.data })}
             onError={setError}
           />
         )}
@@ -240,7 +272,7 @@ function TokenSetup({ onSaved }: { onSaved: () => void }) {
           className="w-full rounded-md border border-zinc-200 px-2 py-1.5 text-xs font-mono outline-none focus:ring-2 focus:ring-zinc-900"
         />
         <p className="text-[10px] text-zinc-400">
-          Override only if running locally (e.g. http://localhost:3000).
+          Override only if running locally.
         </p>
       </div>
 
@@ -291,7 +323,8 @@ function InterviewList({
 
       {interviews.length === 0 ? (
         <p className="rounded-lg border border-dashed border-zinc-300 p-6 text-center text-xs text-zinc-500">
-          No interviews yet. Click <span className="font-medium">+ New</span> to add one.
+          No interviews yet. Click <span className="font-medium">+ New</span> to
+          add one.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -407,7 +440,10 @@ function CreateInterviewForm({
 
       <div className="space-y-1">
         <label className="text-xs font-medium text-zinc-700">
-          Resume <span className="font-normal text-zinc-400">(optional, PDF/DOCX/TXT)</span>
+          Resume{" "}
+          <span className="font-normal text-zinc-400">
+            (optional, PDF/DOCX/TXT)
+          </span>
         </label>
         <input
           type="file"
@@ -441,10 +477,12 @@ function InterviewView({
   data,
   onChange,
   onError,
+  onStartLive,
 }: {
   data: InterviewDetail;
   onChange: () => void;
   onError: (msg: string | null) => void;
+  onStartLive: () => void;
 }) {
   const { interview, questions } = data;
   const [busy, setBusy] = useState(false);
@@ -464,16 +502,24 @@ function InterviewView({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold tracking-tight">
-            {interview.role_title}
-          </h2>
-          <p className="mt-0.5 text-[11px] capitalize text-zinc-500">
-            {interview.seniority} · {interview.status}
-          </p>
-        </div>
+      <div>
+        <h2 className="text-base font-semibold tracking-tight">
+          {interview.role_title}
+        </h2>
+        <p className="mt-0.5 text-[11px] capitalize text-zinc-500">
+          {interview.seniority} · {interview.status}
+        </p>
       </div>
+
+      {questions.length > 0 && (
+        <button
+          type="button"
+          onClick={onStartLive}
+          className="w-full rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+        >
+          ▶ Start live interview
+        </button>
+      )}
 
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -485,7 +531,9 @@ function InterviewView({
           onClick={() => {
             if (
               questions.length > 0 &&
-              !window.confirm("Regenerate replaces the current set. Continue?")
+              !window.confirm(
+                "Regenerate replaces the current set. Continue?",
+              )
             )
               return;
             void run(() => generateQuestions(interview.id));
@@ -519,12 +567,6 @@ function InterviewView({
           ))}
         </ol>
       )}
-
-      <div className="rounded-lg border border-dashed border-zinc-300 p-4 text-center">
-        <p className="text-xs text-zinc-500">
-          Live audio + transcription lands in milestone 5.
-        </p>
-      </div>
     </div>
   );
 }
@@ -538,7 +580,7 @@ function QuestionCard({
   onDelete,
   onMove,
 }: {
-  question: import("./lib/api").Question;
+  question: Question;
   isFirst: boolean;
   isLast: boolean;
   busy: boolean;
@@ -555,7 +597,8 @@ function QuestionCard({
         <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-medium">
           <span className="font-mono text-zinc-400">Q{question.position}</span>
           <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 capitalize text-zinc-700">
-            {CATEGORY_LABEL[question.category] ?? question.category.replace("_", " ")}
+            {CATEGORY_LABEL[question.category] ??
+              question.category.replace("_", " ")}
           </span>
           {question.difficulty && (
             <span className="rounded-full bg-zinc-100 px-1.5 py-0.5 capitalize text-zinc-700">
@@ -564,10 +607,18 @@ function QuestionCard({
           )}
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          <IconBtn label="Up" disabled={busy || isFirst} onClick={() => onMove("up")}>
+          <IconBtn
+            label="Up"
+            disabled={busy || isFirst}
+            onClick={() => onMove("up")}
+          >
             ↑
           </IconBtn>
-          <IconBtn label="Down" disabled={busy || isLast} onClick={() => onMove("down")}>
+          <IconBtn
+            label="Down"
+            disabled={busy || isLast}
+            onClick={() => onMove("down")}
+          >
             ↓
           </IconBtn>
           <IconBtn label="Delete" disabled={busy} onClick={onDelete}>
@@ -645,5 +696,191 @@ function IconBtn({
     >
       {children}
     </button>
+  );
+}
+
+function LiveInterviewView({
+  data,
+  currentIdx,
+  onChangeIdx,
+  onExit,
+  onError,
+}: {
+  data: InterviewDetail;
+  currentIdx: number;
+  onChangeIdx: (idx: number) => void;
+  onExit: () => void;
+  onError: (msg: string | null) => void;
+}) {
+  const { interview, questions } = data;
+  const current = questions[currentIdx];
+
+  const [recording, setRecording] = useState(false);
+  const [chunks, setChunks] = useState<LiveTranscriptChunk[]>([]);
+  const [starting, setStarting] = useState(false);
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  // Listen for transcript chunks broadcast from the offscreen doc.
+  useEffect(() => {
+    function listener(message: {
+      type?: string;
+      text?: string;
+      questionId?: string | null;
+      error?: string;
+    }) {
+      if (message.type === "TRANSCRIPT_CHUNK" && message.text) {
+        setChunks((prev) => [
+          ...prev,
+          {
+            text: message.text!,
+            questionId: message.questionId ?? null,
+            receivedAt: Date.now(),
+          },
+        ]);
+      } else if (message.type === "TRANSCRIPT_ERROR" && message.error) {
+        onError(message.error);
+      } else if (message.type === "CAPTURE_ERROR" && message.error) {
+        onError(message.error);
+        setRecording(false);
+      } else if (message.type === "CAPTURE_STOPPED") {
+        setRecording(false);
+      } else if (message.type === "CAPTURE_STARTED") {
+        setRecording(true);
+      }
+    }
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
+  }, [onError]);
+
+  // Stop capture on unmount.
+  useEffect(() => {
+    return () => {
+      void stopLiveCapture().catch(() => {});
+    };
+  }, []);
+
+  // Auto-scroll transcript.
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chunks.length]);
+
+  async function handleStart() {
+    if (!current) return;
+    onError(null);
+    setStarting(true);
+    try {
+      await startLiveCapture(interview.id, current.id);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to start");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  async function handleStop() {
+    try {
+      await stopLiveCapture();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Failed to stop");
+    }
+  }
+
+  async function handleNext() {
+    const next = currentIdx + 1;
+    if (next >= questions.length) {
+      await handleStop();
+      onExit();
+      return;
+    }
+    onChangeIdx(next);
+    if (recording) {
+      await setLiveQuestion(questions[next].id);
+    }
+  }
+
+  const currentChunks = chunks.filter(
+    (c) => !current || c.questionId === current.id,
+  );
+  const transcriptText = currentChunks.map((c) => c.text).join(" ");
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+          Live · {interview.role_title}
+        </p>
+        <button
+          type="button"
+          onClick={async () => {
+            await handleStop();
+            onExit();
+          }}
+          className="rounded-md border border-zinc-200 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50"
+        >
+          Exit
+        </button>
+      </div>
+
+      {!current ? (
+        <p className="rounded-lg border border-dashed border-zinc-300 p-4 text-center text-xs text-zinc-500">
+          No question selected.
+        </p>
+      ) : (
+        <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
+            Question {currentIdx + 1} of {questions.length}
+            {" · "}
+            {CATEGORY_LABEL[current.category] ?? current.category}
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-zinc-900">
+            {current.prompt}
+          </p>
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        {!recording ? (
+          <button
+            type="button"
+            disabled={starting || !current}
+            onClick={handleStart}
+            className="flex-1 rounded-md bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {starting ? "Starting…" : "● Record answer"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleStop}
+            className="flex-1 rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-700"
+          >
+            ■ Stop
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={handleNext}
+          className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+        >
+          Next ›
+        </button>
+      </div>
+
+      <div>
+        <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+          Transcript {recording && <span className="text-emerald-600">● live</span>}
+        </h3>
+        <div className="max-h-72 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-3 text-xs leading-relaxed text-zinc-800">
+          {transcriptText ? (
+            <p className="whitespace-pre-wrap">{transcriptText}</p>
+          ) : (
+            <p className="italic text-zinc-400">
+              Transcript will appear here as the candidate speaks.
+            </p>
+          )}
+          <div ref={transcriptEndRef} />
+        </div>
+      </div>
+    </div>
   );
 }
