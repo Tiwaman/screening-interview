@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { SENIORITY_LABELS, type Seniority } from "@/lib/types";
+import { QuestionsPanel } from "./questions-panel";
 
 export default async function InterviewDetailPage({
   params,
@@ -10,6 +11,7 @@ export default async function InterviewDetailPage({
 }) {
   const { id } = await params;
   const supabase = await createClient();
+
   const { data: interview, error } = await supabase
     .from("interviews")
     .select("*")
@@ -19,6 +21,22 @@ export default async function InterviewDetailPage({
   if (error || !interview) {
     notFound();
   }
+
+  const { data: questionsRaw } = await supabase
+    .from("questions")
+    .select("id, position, category, difficulty, prompt, edited")
+    .eq("interview_id", id)
+    .neq("category", "followup")
+    .order("position", { ascending: true });
+
+  const questions = (questionsRaw ?? []).map((q) => ({
+    id: q.id as string,
+    position: q.position as number,
+    category: q.category as string,
+    difficulty: (q.difficulty as string | null) ?? null,
+    prompt: q.prompt as string,
+    edited: Boolean(q.edited),
+  }));
 
   const resumeChars =
     typeof interview.resume_parsed?.charCount === "number"
@@ -46,7 +64,7 @@ export default async function InterviewDetailPage({
       <div className="grid gap-4 sm:grid-cols-2">
         <Card label="Job description">
           {interview.jd_text ? (
-            <pre className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
               {interview.jd_text}
             </pre>
           ) : (
@@ -66,11 +84,7 @@ export default async function InterviewDetailPage({
         </Card>
       </div>
 
-      <div className="rounded-2xl border border-dashed border-zinc-300 bg-white p-8 text-center dark:border-zinc-700 dark:bg-zinc-950">
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Question generation lands in milestone&nbsp;3.
-        </p>
-      </div>
+      <QuestionsPanel interviewId={id} questions={questions} />
     </div>
   );
 }
