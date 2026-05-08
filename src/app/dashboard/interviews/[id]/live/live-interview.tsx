@@ -18,7 +18,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   followup: "Follow-up",
 };
 
-const CHUNK_MS = 5000;
+const CHUNK_MS = 3000;
 
 type ChunkEntry = {
   text: string;

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getGemini, GEMINI_FLASH } from "@/lib/llm/gemini";
+import { transcribeWithGroq } from "@/lib/llm/groq-stt";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -39,36 +39,9 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Interview not found" }, { status: 404 });
   }
 
-  const buffer = await audio.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-  const mimeType = audio.type || "audio/webm";
-
   let transcript = "";
   try {
-    const ai = getGemini();
-    const response = await ai.models.generateContent({
-      model: GEMINI_FLASH,
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { inlineData: { mimeType, data: base64 } },
-            {
-              text: [
-                "You are a strict speech-to-text engine. Transcribe the audio EXACTLY as spoken — no paraphrasing, no completion, no hallucination.",
-                "Rules:",
-                "- If the audio is silent, near-silent, music-only, or contains no clearly intelligible speech, return EXACTLY the empty string.",
-                "- Never invent or guess words to fill silence.",
-                "- Never repeat a phrase to pad output.",
-                "- Output only the transcribed words. No quotes, labels, prefixes, or commentary.",
-              ].join("\n"),
-            },
-          ],
-        },
-      ],
-      config: { temperature: 0 },
-    });
-    transcript = (response.text ?? "").trim();
+    transcript = await transcribeWithGroq(audio, audio.name || "audio.webm");
   } catch (err) {
     return NextResponse.json(
       {
