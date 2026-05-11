@@ -12,6 +12,7 @@ import {
   type GeneratedReport,
 } from "@/lib/llm/report";
 import { ReportActions } from "./report-actions";
+import { PrintReportButton } from "./print-button";
 
 type ReportRow = {
   scores: {
@@ -55,8 +56,8 @@ export default async function ReportPage({
     .maybeSingle<ReportRow>();
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="mx-auto max-w-4xl space-y-6 print:max-w-none">
+      <div className="flex items-center justify-between print:hidden">
         <Link
           href={`/dashboard/interviews/${id}`}
           className="text-xs text-zinc-500 hover:text-zinc-700"
@@ -71,14 +72,19 @@ export default async function ReportPage({
 
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Report</h1>
-          {report?.created_at && (
-            <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-              Generated {new Date(report.created_at).toLocaleString()}
-            </p>
-          )}
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Report — {interview.role_title}
+          </h1>
+          <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            {SENIORITY_LABELS[interview.seniority as Seniority]}
+            {report?.created_at &&
+              ` · Generated ${new Date(report.created_at).toLocaleString()}`}
+          </p>
         </div>
-        <ReportActions interviewId={id} hasReport={Boolean(report)} />
+        <div className="flex items-center gap-2 print:hidden">
+          {report && <PrintReportButton />}
+          <ReportActions interviewId={id} hasReport={Boolean(report)} />
+        </div>
       </div>
 
       {!report ? (

@@ -55,6 +55,7 @@ export function LiveInterview({
   const [skippedFor, setSkippedFor] = useState<Set<string>>(new Set());
   const [generatingReport, setGeneratingReport] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(false);
+  const [consentGiven, setConsentGiven] = useState(false);
   const tts = useTts();
   const lastSpokenIdRef = useRef<string | null>(null);
 
@@ -250,6 +251,10 @@ export function LiveInterview({
   }
 
   async function startCapture() {
+    if (!consentGiven) {
+      setError("Please confirm candidate consent before recording.");
+      return;
+    }
     setError(null);
     setStarting(true);
     try {
@@ -417,9 +422,24 @@ export function LiveInterview({
               follow-ups in real time.
             </li>
           </ol>
+
+          <label className="mt-4 flex cursor-pointer gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            <input
+              type="checkbox"
+              checked={consentGiven}
+              onChange={(e) => setConsentGiven(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              I confirm the candidate has been informed and consents to having
+              their answers recorded and transcribed by AI for evaluation
+              purposes. (Required by law in many jurisdictions.)
+            </span>
+          </label>
+
           <button
             type="button"
-            disabled={starting}
+            disabled={starting || !consentGiven}
             onClick={startCapture}
             className="mt-4 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
           >

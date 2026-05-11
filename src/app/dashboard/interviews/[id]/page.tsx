@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { SENIORITY_LABELS, type Seniority } from "@/lib/types";
 import { QuestionsPanel } from "./questions-panel";
+import { DeleteInterviewButton } from "./delete-button";
 
 export default async function InterviewDetailPage({
   params,
@@ -105,6 +106,10 @@ export default async function InterviewDetailPage({
       </div>
 
       <QuestionsPanel interviewId={id} questions={questions} />
+
+      <div className="flex justify-end pt-4">
+        <DeleteInterviewButton interviewId={id} />
+      </div>
     </div>
   );
 }
