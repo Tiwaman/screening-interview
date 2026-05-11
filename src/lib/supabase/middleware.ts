@@ -30,8 +30,6 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const url = request.nextUrl;
-  const isAuthRoute =
-    url.pathname.startsWith("/login") || url.pathname.startsWith("/auth");
 
   if (!user && url.pathname.startsWith("/dashboard")) {
     const redirectUrl = url.clone();
@@ -39,7 +37,9 @@ export async function updateSession(request: NextRequest) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  if (user && isAuthRoute && !url.pathname.startsWith("/auth/callback")) {
+  // Only redirect *signed-in* users away from /login. Other /auth/* routes
+  // (callback, signout) must run their own logic.
+  if (user && url.pathname === "/login") {
     const redirectUrl = url.clone();
     redirectUrl.pathname = "/dashboard";
     return NextResponse.redirect(redirectUrl);
