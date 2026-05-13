@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { transcribeWithGroq } from "@/lib/llm/groq-stt";
-import {
-  transcribeAndDiarizeWithGroq,
-  type DiarizedSegment,
-} from "@/lib/llm/groq-diarize";
+
+type Segment = {
+  speaker: "interviewer" | "candidate";
+  text: string;
+};
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -49,68 +50,65 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Interview not found" }, { status: 404 });
   }
 
-  // ── SAME-ROOM: one mic, both voices, Groq diarization ───────────────
+  // ── SAME-ROOM: one mic carrying both voices. We do NOT try to split
+  // speakers — diarization from a single mic without acoustic fingerprints
+  // is unreliable and produces worse reports than just storing the whole
+  // stream and letting the report LLM analyze it holistically (the prompt
+  // already handles question↔answer mapping from raw content).
   if (mode === "same-room") {
-    // Pull the previous speaker so the diarizer can prefer continuity.
-    const { data: prev } = await supabase
-      .from("transcripts")
-      .select("speaker")
-      .eq("interview_id", interviewId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle<{ speaker: string }>();
-    const previousSpeaker =
-      prev?.speaker === "interviewer"
-        ? ("interviewer" as const)
-        : prev?.speaker === "candidate"
-          ? ("candidate" as const)
-          : null;
-
-    let segments: DiarizedSegment[] = [];
+    let transcript = "";
     try {
-      segments = await transcribeAndDiarizeWithGroq(audio, previousSpeaker);
+      transcript = await transcribeWithGroq(audio, audio.name || "audio.webm");
     } catch (err) {
       return NextResponse.json(
         {
           error:
-            err instanceof Error ? err.message : "Diarization failed.",
+            err instanceof Error ? err.message : "Transcription failed.",
         },
         { status: 500 },
       );
     }
-
-    const persisted: DiarizedSegment[] = [];
-    for (const seg of segments) {
-      // Dedup vs last chunk for the same speaker.
-      const { data: last } = await supabase
-        .from("transcripts")
-        .select("content")
-        .eq("interview_id", interviewId)
-        .eq("speaker", seg.speaker)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle<{ content: string }>();
-      if (last?.content?.trim() === seg.text) continue;
-
-      await supabase.from("transcripts").insert({
-        interview_id: interviewId,
-        question_id: seg.speaker === "candidate" ? questionId : null,
-        speaker: seg.speaker,
-        content: seg.text,
-        ended_at: new Date().toISOString(),
+    if (!transcript) {
+      return NextResponse.json({
+        mode: "same-room",
+        transcript: "",
+        segments: [],
       });
-      persisted.push(seg);
     }
 
+    // Dedup vs the most recent chunk regardless of speaker tag.
+    const { data: last } = await supabase
+      .from("transcripts")
+      .select("content")
+      .eq("interview_id", interviewId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ content: string }>();
+    if (last?.content?.trim() === transcript) {
+      return NextResponse.json({
+        mode: "same-room",
+        transcript: "",
+        segments: [],
+      });
+    }
+
+    // Save as a single row associated with the active question. We use
+    // speaker='candidate' so the existing schema check passes; the report
+    // prompt is explicitly told that same-room transcripts mix both voices
+    // and to use content (not the label) to attribute statements.
+    await supabase.from("transcripts").insert({
+      interview_id: interviewId,
+      question_id: questionId,
+      speaker: "candidate",
+      content: transcript,
+      ended_at: new Date().toISOString(),
+    });
+
+    const seg: Segment = { speaker: "candidate", text: transcript };
     return NextResponse.json({
       mode: "same-room",
-      segments: persisted,
-      // backward-compat single string of *candidate-only* text for callers
-      // that still read transcript directly
-      transcript: persisted
-        .filter((s) => s.speaker === "candidate")
-        .map((s) => s.text)
-        .join(" "),
+      transcript,
+      segments: [seg],
     });
   }
 

@@ -333,10 +333,14 @@ export function LiveInterview({
       return next;
     });
 
-    // Run the matcher on every interviewer segment we just received.
-    for (const seg of segments) {
-      if (seg.speaker === "interviewer") {
-        void runMatcher(seg.text);
+    // Run the matcher only in remote mode where interviewer chunks are
+    // genuinely separated from the candidate stream. In same-room we can't
+    // reliably attribute speech to the interviewer alone.
+    if (modeRef.current === "remote") {
+      for (const seg of segments) {
+        if (seg.speaker === "interviewer") {
+          void runMatcher(seg.text);
+        }
       }
     }
   }
@@ -638,13 +642,19 @@ export function LiveInterview({
                   prompted — both voices in the room go through this one mic.
                 </li>
                 <li>
-                  Speak normally with the candidate. Each chunk is transcribed
-                  by Whisper and split into interviewer / candidate by Llama
-                  before it&apos;s saved.
+                  Whisper transcribes the full conversation continuously. We
+                  don&apos;t try to label who said what — speaker separation
+                  from one mic is unreliable.
                 </li>
                 <li>
-                  Auto-advance, off-script flags, and follow-ups all work the
-                  same way.
+                  <span className="font-medium">Click Next manually</span> as
+                  you move between questions. The report analyzes the whole
+                  transcript and figures out which words answered which
+                  question.
+                </li>
+                <li>
+                  Follow-up suggestions still work — they look at the
+                  transcript for the active question.
                 </li>
               </ol>
             )}
@@ -687,10 +697,10 @@ export function LiveInterview({
           ) : (
             <span className="inline-flex items-center gap-1 text-amber-600">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-              One mic · diarized by Whisper + Llama
+              One mic · capturing full conversation
             </span>
           )}
-          {micGranted && (
+          {mode === "remote" && micGranted && (
             <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
               <input
                 type="checkbox"
@@ -700,6 +710,11 @@ export function LiveInterview({
               />
               Auto-advance on my prompts
             </label>
+          )}
+          {mode === "same-room" && (
+            <span className="ml-auto text-[10px] text-zinc-500 dark:text-zinc-400">
+              Advance manually — analysis happens at report time
+            </span>
           )}
         </div>
       )}
@@ -824,7 +839,9 @@ export function LiveInterview({
 
       <div>
         <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Candidate&apos;s answer
+          {mode === "remote"
+            ? "Candidate's answer"
+            : "Conversation for this question"}
           {recording && (
             <span className="inline-flex items-center gap-1 text-emerald-600">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" />
@@ -838,7 +855,9 @@ export function LiveInterview({
           ) : (
             <p className="italic text-zinc-400 dark:text-zinc-500">
               {recording
-                ? "Listening for the candidate…"
+                ? mode === "remote"
+                  ? "Listening for the candidate…"
+                  : "Listening to the room…"
                 : "No transcript yet for this question."}
             </p>
           )}
@@ -848,28 +867,36 @@ export function LiveInterview({
       {chunks.length > 0 && (
         <details className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
           <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-zinc-500">
-            Live transcript · both speakers ({chunks.length} chunks)
+            {mode === "remote"
+              ? `Live transcript · both speakers (${chunks.length} chunks)`
+              : `Full transcript · entire conversation (${chunks.length} chunks)`}
           </summary>
           <ul className="mt-3 space-y-2">
             {chunks.map((c, i) => (
               <li
                 key={i}
                 className={`rounded-md px-3 py-2 ${
-                  c.speaker === "interviewer"
+                  mode === "remote" && c.speaker === "interviewer"
                     ? "border-l-2 border-amber-400 bg-amber-50/60 dark:bg-amber-950/40"
-                    : "border-l-2 border-emerald-400 bg-emerald-50/60 dark:bg-emerald-950/40"
+                    : "border-l-2 border-zinc-300 bg-zinc-50/60 dark:border-zinc-700 dark:bg-zinc-900/40"
                 }`}
               >
                 <p className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-500">
-                  <span
-                    className={
-                      c.speaker === "interviewer"
-                        ? "font-semibold text-amber-700 dark:text-amber-300"
-                        : "font-semibold text-emerald-700 dark:text-emerald-300"
-                    }
-                  >
-                    {c.speaker}
-                  </span>
+                  {mode === "remote" ? (
+                    <span
+                      className={
+                        c.speaker === "interviewer"
+                          ? "font-semibold text-amber-700 dark:text-amber-300"
+                          : "font-semibold text-emerald-700 dark:text-emerald-300"
+                      }
+                    >
+                      {c.speaker}
+                    </span>
+                  ) : (
+                    <span className="font-semibold text-zinc-700 dark:text-zinc-300">
+                      room audio
+                    </span>
+                  )}
                   <span>· {new Date(c.receivedAt).toLocaleTimeString()}</span>
                   {c.questionId && (
                     <span>
@@ -949,9 +976,9 @@ function ModeSelector({
             )}
           </div>
           <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-            Candidate sitting across from you. One mic, both voices. Whisper
-            transcribes; Llama splits the chunk into interviewer / candidate
-            before saving.
+            Candidate sitting across from you. One mic captures the whole
+            conversation. No speaker labels — the report analyzes the full
+            transcript at the end. Manual Next between questions.
           </p>
         </button>
       </div>
