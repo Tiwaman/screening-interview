@@ -638,8 +638,9 @@ export function LiveInterview({
                   prompted — both voices in the room go through this one mic.
                 </li>
                 <li>
-                  Speak normally with the candidate. Each chunk is split into
-                  interviewer / candidate by Gemini before it&apos;s saved.
+                  Speak normally with the candidate. Each chunk is transcribed
+                  by Whisper and split into interviewer / candidate by Llama
+                  before it&apos;s saved.
                 </li>
                 <li>
                   Auto-advance, off-script flags, and follow-ups all work the
@@ -686,7 +687,7 @@ export function LiveInterview({
           ) : (
             <span className="inline-flex items-center gap-1 text-amber-600">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-              One mic · diarized by Gemini
+              One mic · diarized by Whisper + Llama
             </span>
           )}
           {micGranted && (
@@ -948,8 +949,9 @@ function ModeSelector({
             )}
           </div>
           <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
-            Candidate sitting across from you. One mic, both voices. Gemini
-            splits the chunk into interviewer / candidate before saving.
+            Candidate sitting across from you. One mic, both voices. Whisper
+            transcribes; Llama splits the chunk into interviewer / candidate
+            before saving.
           </p>
         </button>
       </div>

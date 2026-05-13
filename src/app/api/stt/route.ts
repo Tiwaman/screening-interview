@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { transcribeWithGroq } from "@/lib/llm/groq-stt";
 import {
-  transcribeAndDiarize,
+  transcribeAndDiarizeWithGroq,
   type DiarizedSegment,
-} from "@/lib/llm/gemini-diarize";
+} from "@/lib/llm/groq-diarize";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -53,7 +53,7 @@ export async function POST(request: Request) {
   if (mode === "same-room") {
     let segments: DiarizedSegment[] = [];
     try {
-      segments = await transcribeAndDiarize(audio);
+      segments = await transcribeAndDiarizeWithGroq(audio);
     } catch (err) {
       return NextResponse.json(
         {
