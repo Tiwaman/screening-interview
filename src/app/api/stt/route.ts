@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { transcribeWithGroq } from "@/lib/llm/groq-stt";
+import {
+  transcribeAndDiarize,
+  type DiarizedSegment,
+} from "@/lib/llm/gemini-diarize";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
+
+type Mode = "remote" | "same-room";
 
 export async function POST(request: Request) {
   const supabase = await createClient();
@@ -22,6 +28,10 @@ export async function POST(request: Request) {
     (formData.get("speaker") as string | null) === "interviewer"
       ? "interviewer"
       : "candidate";
+  const mode: Mode =
+    (formData.get("mode") as string | null) === "same-room"
+      ? "same-room"
+      : "remote";
 
   if (!audio || !interviewId) {
     return NextResponse.json(
@@ -39,6 +49,57 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Interview not found" }, { status: 404 });
   }
 
+  // ── SAME-ROOM: one mic, both voices, Gemini diarization ──────────────
+  if (mode === "same-room") {
+    let segments: DiarizedSegment[] = [];
+    try {
+      segments = await transcribeAndDiarize(audio);
+    } catch (err) {
+      return NextResponse.json(
+        {
+          error:
+            err instanceof Error ? err.message : "Diarization failed.",
+        },
+        { status: 500 },
+      );
+    }
+
+    const persisted: DiarizedSegment[] = [];
+    for (const seg of segments) {
+      // Dedup vs last chunk for the same speaker.
+      const { data: last } = await supabase
+        .from("transcripts")
+        .select("content")
+        .eq("interview_id", interviewId)
+        .eq("speaker", seg.speaker)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle<{ content: string }>();
+      if (last?.content?.trim() === seg.text) continue;
+
+      await supabase.from("transcripts").insert({
+        interview_id: interviewId,
+        question_id: seg.speaker === "candidate" ? questionId : null,
+        speaker: seg.speaker,
+        content: seg.text,
+        ended_at: new Date().toISOString(),
+      });
+      persisted.push(seg);
+    }
+
+    return NextResponse.json({
+      mode: "same-room",
+      segments: persisted,
+      // backward-compat single string of *candidate-only* text for callers
+      // that still read transcript directly
+      transcript: persisted
+        .filter((s) => s.speaker === "candidate")
+        .map((s) => s.text)
+        .join(" "),
+    });
+  }
+
+  // ── REMOTE: speaker provided by caller, Groq Whisper, single segment ─
   let transcript = "";
   try {
     transcript = await transcribeWithGroq(audio, audio.name || "audio.webm");
@@ -52,11 +113,8 @@ export async function POST(request: Request) {
     );
   }
 
-  // De-dupe: if this transcript is identical to the last chunk for the same
-  // interview/question, drop it. Catches Gemini's classic repeat-loop on
-  // short / silent chunks.
   if (transcript) {
-    const { data: lastChunk } = await supabase
+    const { data: last } = await supabase
       .from("transcripts")
       .select("content")
       .eq("interview_id", interviewId)
@@ -64,19 +122,25 @@ export async function POST(request: Request) {
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle<{ content: string }>();
-
-    if (lastChunk?.content?.trim() === transcript) {
-      return NextResponse.json({ transcript: "" });
+    if (last?.content?.trim() === transcript) {
+      return NextResponse.json({
+        mode: "remote",
+        transcript: "",
+        segments: [],
+      });
     }
-
     await supabase.from("transcripts").insert({
       interview_id: interviewId,
-      question_id: questionId,
+      question_id: speaker === "candidate" ? questionId : null,
       speaker,
       content: transcript,
       ended_at: new Date().toISOString(),
     });
   }
 
-  return NextResponse.json({ transcript });
+  return NextResponse.json({
+    mode: "remote",
+    transcript,
+    segments: transcript ? [{ speaker, text: transcript }] : [],
+  });
 }

@@ -20,12 +20,19 @@ const CATEGORY_LABEL: Record<string, string> = {
   followup: "Follow-up",
 };
 
-const CHUNK_MS = 3000;
 const SILENCE_TRIGGER_MS = 6000;
 const MIN_ANSWER_LEN = 30;
 const MATCH_CONFIDENCE_THRESHOLD = 0.65;
 
+// Different chunk sizes per mode:
+// - Remote: short chunks for low latency; each stream has a clean speaker.
+// - Same-room: longer chunks so Gemini has enough context to diarize.
+const CHUNK_MS_REMOTE = 3000;
+const CHUNK_MS_SAME_ROOM = 5000;
+
 type Speaker = "candidate" | "interviewer";
+type Mode = "remote" | "same-room";
+const MODE_STORAGE_KEY = "live.mode";
 
 type ChunkEntry = {
   text: string;
@@ -47,6 +54,12 @@ type MatchResult = {
   is_off_script: boolean;
   signaled_advance: boolean;
   reasoning: string;
+};
+
+type SttResponse = {
+  mode: Mode;
+  transcript?: string;
+  segments?: { speaker: Speaker; text: string }[];
 };
 
 export function LiveInterview({
@@ -71,16 +84,28 @@ export function LiveInterview({
   const [autoAdvance, setAutoAdvance] = useState(true);
   const [micGranted, setMicGranted] = useState(false);
   const [advanceToast, setAdvanceToast] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("remote");
+
+  // Hydrate mode preference from localStorage on mount.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(MODE_STORAGE_KEY) as Mode | null;
+    if (stored === "remote" || stored === "same-room") setMode(stored);
+  }, []);
+  function selectMode(m: Mode) {
+    setMode(m);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(MODE_STORAGE_KEY, m);
+    }
+  }
 
   const tts = useTts();
   const lastSpokenIdRef = useRef<string | null>(null);
 
-  // Candidate (tab) capture
+  // Streams + recorders
   const tabStreamRef = useRef<MediaStream | null>(null);
   const tabRecorderRef = useRef<MediaRecorder | null>(null);
   const tabChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Interviewer (mic) capture
   const micStreamRef = useRef<MediaStream | null>(null);
   const micRecorderRef = useRef<MediaRecorder | null>(null);
   const micChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -95,10 +120,10 @@ export function LiveInterview({
   const questionsRef = useRef<Question[]>(initialQuestions);
   const currentIdxRef = useRef(0);
   const autoAdvanceRef = useRef(autoAdvance);
+  const modeRef = useRef<Mode>(mode);
   const lastMatchedRef = useRef<string | null>(null);
-
-  const transcriptEndRef = useRef<HTMLDivElement>(null);
   const lastEvaluatedAnswerRef = useRef<Record<string, string>>({});
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   const current = questions[currentIdx];
 
@@ -125,6 +150,9 @@ export function LiveInterview({
   useEffect(() => {
     autoAdvanceRef.current = autoAdvance;
   }, [autoAdvance]);
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -135,26 +163,23 @@ export function LiveInterview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── End-of-answer detection (candidate only) ──────────────────────────
+  // End-of-answer detection (candidate only)
   useEffect(() => {
     if (!recording || !current) return;
     const lastCandidateChunk = [...chunks]
       .reverse()
       .find((c) => c.speaker === "candidate" && c.questionId === current.id);
     if (!lastCandidateChunk) return;
-
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     silenceTimerRef.current = setTimeout(() => {
       void maybeSuggestFollowup();
     }, SILENCE_TRIGGER_MS);
-
     return () => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chunks, recording, current]);
 
-  // ── Answer + follow-up suggestion ─────────────────────────────────────
   function answerForCurrent(): string {
     if (!current) return "";
     return chunks
@@ -168,7 +193,6 @@ export function LiveInterview({
     if (!current || suggesting) return;
     if (suggestion && suggestion.forQuestionId === current.id) return;
     if (skippedFor.has(current.id) && !force) return;
-
     const answer = answerForCurrent();
     if (answer.length < MIN_ANSWER_LEN) return;
     if (lastEvaluatedAnswerRef.current[current.id] === answer && !force) return;
@@ -248,16 +272,20 @@ export function LiveInterview({
     setSuggestion(null);
   }
 
-  // ── STT upload ────────────────────────────────────────────────────────
-  async function uploadChunk(blob: Blob, speaker: Speaker) {
+  // ── Upload + dispatch ─────────────────────────────────────────────────
+  async function uploadChunk(
+    blob: Blob,
+    speaker: Speaker,
+  ): Promise<SttResponse | null> {
     if (blob.size < 1_000) return null;
     const fd = new FormData();
-    fd.set("audio", blob, `chunk-${speaker}.webm`);
+    fd.set("audio", blob, `chunk.webm`);
     fd.set("interview_id", interviewId);
     fd.set("speaker", speaker);
-    const questionId =
+    fd.set("mode", modeRef.current);
+    const qid =
       speaker === "candidate" ? currentQuestionIdRef.current : null;
-    if (questionId) fd.set("question_id", questionId);
+    if (qid) fd.set("question_id", qid);
 
     try {
       const res = await fetch("/api/stt", { method: "POST", body: fd });
@@ -266,8 +294,7 @@ export function LiveInterview({
         setError(`STT ${res.status}: ${body || "request failed"}`);
         return null;
       }
-      const data = (await res.json()) as { transcript?: string };
-      return data.transcript ?? "";
+      return (await res.json()) as SttResponse;
     } catch (err) {
       setError(err instanceof Error ? err.message : "STT request failed");
       return null;
@@ -275,32 +302,45 @@ export function LiveInterview({
   }
 
   async function handleChunk(blob: Blob, speaker: Speaker) {
-    const text = await uploadChunk(blob, speaker);
-    if (!text) return;
+    const data = await uploadChunk(blob, speaker);
+    if (!data) return;
+
+    // In same-room mode the server returns potentially multiple segments,
+    // each with its own resolved speaker. In remote mode it's one segment
+    // with the caller-provided speaker.
+    const segments =
+      data.segments && data.segments.length > 0
+        ? data.segments
+        : data.transcript
+          ? [{ speaker, text: data.transcript }]
+          : [];
+
+    if (segments.length === 0) return;
 
     setChunks((prev) => {
-      const lastForSpeaker = [...prev]
-        .reverse()
-        .find((c) => c.speaker === speaker);
-      if (lastForSpeaker && lastForSpeaker.text === text) return prev;
-      return [
-        ...prev,
-        {
-          text,
-          speaker,
+      const next = [...prev];
+      for (const seg of segments) {
+        const last = [...next].reverse().find((c) => c.speaker === seg.speaker);
+        if (last && last.text === seg.text) continue;
+        next.push({
+          text: seg.text,
+          speaker: seg.speaker,
           questionId:
-            speaker === "candidate" ? currentQuestionIdRef.current : null,
+            seg.speaker === "candidate" ? currentQuestionIdRef.current : null,
           receivedAt: Date.now(),
-        },
-      ];
+        });
+      }
+      return next;
     });
 
-    if (speaker === "interviewer") {
-      void runMatcher(text);
+    // Run the matcher on every interviewer segment we just received.
+    for (const seg of segments) {
+      if (seg.speaker === "interviewer") {
+        void runMatcher(seg.text);
+      }
     }
   }
 
-  // ── Interviewer-to-question matcher + auto-advance ────────────────────
   async function runMatcher(snippet: string) {
     if (!autoAdvanceRef.current) return;
     if (snippet.length < 4) return;
@@ -318,7 +358,6 @@ export function LiveInterview({
       const result = (await res.json()) as MatchResult;
 
       if (result.is_off_script) {
-        // Tag the most recent interviewer chunk as off-script
         setChunks((prev) => {
           const next = [...prev];
           for (let i = next.length - 1; i >= 0; i--) {
@@ -343,7 +382,6 @@ export function LiveInterview({
           (q) => q.id === result.matched_question_id,
         );
         if (targetIdx < 0) return;
-        // Only advance forward unless explicitly signaled
         if (
           targetIdx <= currentIdxRef.current &&
           !result.signaled_advance
@@ -353,20 +391,43 @@ export function LiveInterview({
         lastMatchedRef.current = result.matched_question_id;
         setCurrentIdx(targetIdx);
         currentQuestionIdRef.current = qs[targetIdx].id;
-        setAdvanceToast(`Q${targetIdx + 1} · ${qs[targetIdx].prompt.slice(0, 60)}${qs[targetIdx].prompt.length > 60 ? "…" : ""}`);
+        setAdvanceToast(
+          `Q${targetIdx + 1} · ${qs[targetIdx].prompt.slice(0, 60)}${qs[targetIdx].prompt.length > 60 ? "…" : ""}`,
+        );
         setTimeout(() => setAdvanceToast(null), 3500);
       }
     } catch {
-      /* matcher failures are non-fatal */
+      /* non-fatal */
     }
   }
 
-  // ── Capture lifecycle ─────────────────────────────────────────────────
+  // ── Capture ───────────────────────────────────────────────────────────
   async function startCapture() {
     setError(null);
     setStarting(true);
     try {
-      // 1. Mic (interviewer) — request first; it's a smaller commitment
+      stoppingRef.current = false;
+
+      if (modeRef.current === "same-room") {
+        // Same-room: ONLY mic. Both speakers are in the room, one source.
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        setMicGranted(true);
+        micStreamRef.current = stream;
+        stream
+          .getAudioTracks()
+          .forEach((t) => (t.onended = () => stopCapture()));
+        setRecording(true);
+        startMicChunkCycle("interviewer", CHUNK_MS_SAME_ROOM); // speaker tag is ignored downstream when mode=same-room (server diarizes); we still pass "interviewer" for symmetry, but actually we want the diarized response. Speaker doesn't matter on the request side when mode=same-room.
+        return;
+      }
+
+      // Remote mode: mic for interviewer + tab share for candidate.
       let micStream: MediaStream | null = null;
       try {
         micStream = await navigator.mediaDevices.getUserMedia({
@@ -377,15 +438,13 @@ export function LiveInterview({
           },
         });
         setMicGranted(true);
-      } catch (err) {
+      } catch {
         setMicGranted(false);
-        console.warn("[live] mic denied", err);
         setError(
-          "Mic permission denied — auto-advance and off-script detection won't run. You can still capture candidate audio.",
+          "Mic permission denied — auto-advance and off-script detection won't run.",
         );
       }
 
-      // 2. Tab (candidate)
       const tabStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: true,
@@ -401,12 +460,9 @@ export function LiveInterview({
       tabStream.getVideoTracks().forEach((t) => t.stop());
       const tabAudioStream = new MediaStream(tabAudio);
 
-      // Pipe tab audio back to speakers so the call still plays normally.
       const ctx = new AudioContext();
       audioCtxRef.current = ctx;
-      ctx
-        .createMediaStreamSource(tabAudioStream)
-        .connect(ctx.destination);
+      ctx.createMediaStreamSource(tabAudioStream).connect(ctx.destination);
 
       tabStreamRef.current = tabAudioStream;
       tabAudio.forEach((t) => (t.onended = () => stopCapture()));
@@ -418,14 +474,11 @@ export function LiveInterview({
           .forEach((t) => (t.onended = () => stopCapture()));
       }
 
-      stoppingRef.current = false;
       setRecording(true);
       startTabChunkCycle();
-      if (micStream) startMicChunkCycle();
+      if (micStream) startMicChunkCycle("interviewer", CHUNK_MS_REMOTE);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to start capture",
-      );
+      setError(err instanceof Error ? err.message : "Failed to start capture");
     } finally {
       setStarting(false);
     }
@@ -450,10 +503,10 @@ export function LiveInterview({
     recorder.start();
     tabChunkTimerRef.current = setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
-    }, CHUNK_MS);
+    }, CHUNK_MS_REMOTE);
   }
 
-  function startMicChunkCycle() {
+  function startMicChunkCycle(defaultSpeaker: Speaker, chunkMs: number) {
     const stream = micStreamRef.current;
     if (!stream || stoppingRef.current) return;
     const blobs: Blob[] = [];
@@ -466,39 +519,34 @@ export function LiveInterview({
     };
     recorder.onstop = () => {
       const blob = new Blob(blobs, { type: "audio/webm;codecs=opus" });
-      if (blob.size > 0) void handleChunk(blob, "interviewer");
-      if (!stoppingRef.current) startMicChunkCycle();
+      if (blob.size > 0) void handleChunk(blob, defaultSpeaker);
+      if (!stoppingRef.current) startMicChunkCycle(defaultSpeaker, chunkMs);
     };
     recorder.start();
     micChunkTimerRef.current = setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
-    }, CHUNK_MS);
+    }, chunkMs);
   }
 
   function stopCapture() {
     stoppingRef.current = true;
-
     [tabChunkTimerRef, micChunkTimerRef, silenceTimerRef].forEach((ref) => {
       if (ref.current) {
         clearTimeout(ref.current);
         ref.current = null;
       }
     });
-
     [tabRecorderRef, micRecorderRef].forEach((ref) => {
       const r = ref.current;
       if (r && r.state !== "inactive") r.stop();
       ref.current = null;
     });
-
     tabStreamRef.current?.getTracks().forEach((t) => t.stop());
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     tabStreamRef.current = null;
     micStreamRef.current = null;
-
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
-
     setRecording(false);
   }
 
@@ -532,7 +580,6 @@ export function LiveInterview({
     setCurrentIdx(next);
     currentQuestionIdRef.current = questions[next].id;
   }
-
   function handlePrev() {
     if (currentIdx === 0) return;
     const prev = currentIdx - 1;
@@ -544,9 +591,7 @@ export function LiveInterview({
   const candidateChunksForCurrent = chunks.filter(
     (c) => c.speaker === "candidate" && current && c.questionId === current.id,
   );
-  const transcriptText = candidateChunksForCurrent
-    .map((c) => c.text)
-    .join(" ");
+  const transcriptText = candidateChunksForCurrent.map((c) => c.text).join(" ");
   const answerLen = transcriptText.length;
 
   return (
@@ -564,55 +609,86 @@ export function LiveInterview({
       )}
 
       {!recording && (
-        <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
-          <h2 className="text-sm font-semibold">Start the live interview</h2>
-          <ol className="mt-2 list-inside list-decimal space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
-            <li>
-              <span className="font-medium">Allow microphone</span> when
-              prompted — the agent listens to your prompts and auto-advances
-              the question card.
-            </li>
-            <li>
-              Then pick your <span className="font-medium">meeting tab</span>{" "}
-              in Chrome&apos;s share picker and{" "}
-              <span className="font-medium">
-                tick &ldquo;Share tab audio&rdquo;
-              </span>{" "}
-              to capture the candidate.
-            </li>
-            <li>
-              Audio is transcribed live. Follow-ups surface in the margin.
-            </li>
-          </ol>
-          <button
-            type="button"
-            disabled={starting}
-            onClick={startCapture}
-            className="mt-4 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
-          >
-            {starting ? "Waiting…" : "▶ Start sharing"}
-          </button>
-        </div>
+        <>
+          <ModeSelector mode={mode} onChange={selectMode} />
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
+            {mode === "remote" ? (
+              <ol className="list-inside list-decimal space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+                <li>
+                  <span className="font-medium">Allow microphone</span> when
+                  prompted — auto-advance uses your prompts.
+                </li>
+                <li>
+                  Pick your <span className="font-medium">meeting tab</span> in
+                  Chrome&apos;s share picker and tick{" "}
+                  <span className="font-medium">
+                    &ldquo;Share tab audio&rdquo;
+                  </span>
+                  .
+                </li>
+                <li>
+                  Audio is transcribed live and follow-ups surface in the
+                  margin.
+                </li>
+              </ol>
+            ) : (
+              <ol className="list-inside list-decimal space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+                <li>
+                  <span className="font-medium">Allow microphone</span> when
+                  prompted — both voices in the room go through this one mic.
+                </li>
+                <li>
+                  Speak normally with the candidate. Each chunk is split into
+                  interviewer / candidate by Gemini before it&apos;s saved.
+                </li>
+                <li>
+                  Auto-advance, off-script flags, and follow-ups all work the
+                  same way.
+                </li>
+              </ol>
+            )}
+            <button
+              type="button"
+              disabled={starting}
+              onClick={startCapture}
+              className="mt-4 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {starting ? "Waiting…" : "▶ Start"}
+            </button>
+          </div>
+        </>
       )}
 
       {recording && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] dark:border-zinc-800 dark:bg-zinc-950">
-          <span className="inline-flex items-center gap-1 text-emerald-600">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" />
-            Candidate · capturing tab
+          <span className="rounded-full bg-zinc-100 px-2 py-0.5 font-semibold uppercase tracking-wide text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            {mode === "remote" ? "Remote" : "Same room"}
           </span>
-          <span
-            className={`inline-flex items-center gap-1 ${
-              micGranted ? "text-amber-600" : "text-zinc-400 line-through"
-            }`}
-          >
-            <span
-              className={`inline-block h-2 w-2 rounded-full ${
-                micGranted ? "animate-pulse bg-amber-500" : "bg-zinc-400"
-              }`}
-            />
-            Interviewer · {micGranted ? "mic on" : "mic off"}
-          </span>
+          {mode === "remote" ? (
+            <>
+              <span className="inline-flex items-center gap-1 text-emerald-600">
+                <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" />
+                Candidate · tab
+              </span>
+              <span
+                className={`inline-flex items-center gap-1 ${
+                  micGranted ? "text-amber-600" : "text-zinc-400 line-through"
+                }`}
+              >
+                <span
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    micGranted ? "animate-pulse bg-amber-500" : "bg-zinc-400"
+                  }`}
+                />
+                Interviewer · mic
+              </span>
+            </>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-amber-600">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+              One mic · diarized by Gemini
+            </span>
+          )}
           {micGranted && (
             <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
               <input
@@ -713,20 +789,18 @@ export function LiveInterview({
 
       {suggestion && current && suggestion.forQuestionId === current.id && (
         <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 dark:border-amber-700 dark:bg-amber-950">
-          <div className="flex items-start justify-between gap-3">
-            <div className="space-y-1.5">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
-                Suggested follow-up
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
+              Suggested follow-up
+            </p>
+            <p className="text-sm leading-relaxed text-zinc-900 dark:text-zinc-50">
+              {suggestion.prompt}
+            </p>
+            {suggestion.reason && (
+              <p className="text-[11px] italic text-amber-800 dark:text-amber-300">
+                {suggestion.reason}
               </p>
-              <p className="text-sm leading-relaxed text-zinc-900 dark:text-zinc-50">
-                {suggestion.prompt}
-              </p>
-              {suggestion.reason && (
-                <p className="text-[11px] italic text-amber-800 dark:text-amber-300">
-                  {suggestion.reason}
-                </p>
-              )}
-            </div>
+            )}
           </div>
           <div className="mt-3 flex gap-2">
             <button
@@ -747,7 +821,6 @@ export function LiveInterview({
         </div>
       )}
 
-      {/* Per-question candidate transcript */}
       <div>
         <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
           Candidate&apos;s answer
@@ -771,7 +844,6 @@ export function LiveInterview({
         </div>
       </div>
 
-      {/* Combined two-speaker stream */}
       {chunks.length > 0 && (
         <details className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
           <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-zinc-500">
@@ -819,6 +891,68 @@ export function LiveInterview({
           </ul>
         </details>
       )}
+    </div>
+  );
+}
+
+function ModeSelector({
+  mode,
+  onChange,
+}: {
+  mode: Mode;
+  onChange: (m: Mode) => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+      <p className="mb-3 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+        Where is the candidate?
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onChange("remote")}
+          className={`rounded-lg border p-4 text-left transition ${
+            mode === "remote"
+              ? "border-emerald-500 bg-emerald-50 dark:border-emerald-500 dark:bg-emerald-950/40"
+              : "border-zinc-200 hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600"
+          }`}
+        >
+          <div className="flex items-baseline justify-between">
+            <p className="text-sm font-semibold">Remote</p>
+            {mode === "remote" && (
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                Selected
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+            On Meet / Zoom / Teams. Candidate audio comes from the meeting tab;
+            your mic stays separate. Lowest latency (Groq Whisper).
+          </p>
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange("same-room")}
+          className={`rounded-lg border p-4 text-left transition ${
+            mode === "same-room"
+              ? "border-emerald-500 bg-emerald-50 dark:border-emerald-500 dark:bg-emerald-950/40"
+              : "border-zinc-200 hover:border-zinc-400 dark:border-zinc-800 dark:hover:border-zinc-600"
+          }`}
+        >
+          <div className="flex items-baseline justify-between">
+            <p className="text-sm font-semibold">Same room</p>
+            {mode === "same-room" && (
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-300">
+                Selected
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+            Candidate sitting across from you. One mic, both voices. Gemini
+            splits the chunk into interviewer / candidate before saving.
+          </p>
+        </button>
+      </div>
     </div>
   );
 }
