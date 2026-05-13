@@ -129,19 +129,24 @@ const RESPONSE_SCHEMA = {
 
 const SYSTEM_INSTRUCTION = `You are a hiring lead writing a candid screening interview report.
 
-Scoring rubric (1-5 per dimension):
-- 1: Strong concern. Multiple specific failures.
-- 2: Below the bar for this seniority.
-- 3: Meets the bar. Acceptable but unremarkable.
-- 4: Above the bar. Multiple strong signals.
-- 5: Exceptional. Rare, high-confidence "yes".
+You are given the prepared questions AND a chronological transcript log of the actual conversation, with each line tagged by speaker (interviewer / candidate). The pairing of questions to answers may have drifted during the call (interviewer paraphrased, asked follow-ups, went off-script). Speaker labels are sometimes noisy — trust content over the label when they conflict (an utterance asking a question is from the interviewer; one giving a substantive answer is from the candidate, regardless of tag).
+
+Step 1 — silently map answers to questions
+For each prepared question, find the candidate utterances that answered it (in any wording). Some prepared questions may not have been asked; some answers may not map to any prepared question (treat as off-script content but still use them for dimension scoring).
+
+Step 2 — score against the rubric
+1: Strong concern. Multiple specific failures.
+2: Below the bar for this seniority.
+3: Meets the bar. Acceptable but unremarkable.
+4: Above the bar. Multiple strong signals.
+5: Exceptional. Rare, high-confidence "yes".
 
 Evidence rules:
-- Each evidence string MUST be a verbatim or near-verbatim quote from the candidate's transcript.
-- Maximum 3 quotes per dimension; quotes must each be under 30 words.
-- If no clear evidence exists for a dimension, return value 3 with an empty evidence array and explain via concerns.
+- Each evidence string MUST be a verbatim or near-verbatim quote from the candidate's transcript log.
+- Maximum 3 quotes per dimension; quotes under 30 words.
+- If a dimension has no clear evidence (very short interview, candidate barely spoke), return value 3 with empty evidence and explain via concerns. Do NOT default to 1 or strong_no_hire just because evidence is sparse — that's a separate concern recorded in 'concerns' or 'red_flags'.
 
-Hire recommendation aligns to the average score and the strongest signals — not a strict mean. Trust strong red flags.
+Critical: ONLY recommend strong_no_hire / no_hire when there are concrete negative signals in the transcript (incorrect technical claims, blame patterns, evasion under probing, contradictions with resume). Absence of evidence is not evidence of absence — if the candidate barely spoke, set hire_recommendation='lean_hire' with low confidence and note the data shortage in concerns.
 
 Be honest. Don't pad. Don't invent quotes. Don't hedge.`;
 
@@ -155,10 +160,12 @@ export type ReportInput = {
   seniority: Seniority;
   jdText: string | null;
   resumeText: string | null;
-  qa: Array<{
-    question: string;
-    category: string;
-    answer: string;
+  questions: Array<{ position: number; prompt: string; category: string }>;
+  transcriptLog: Array<{
+    speaker: "interviewer" | "candidate";
+    content: string;
+    question_id: string | null;
+    questionPosition: number | null;
   }>;
 };
 
@@ -169,12 +176,30 @@ export async function generateReport(input: ReportInput): Promise<GeneratedRepor
     (d) => `- **${DIMENSION_LABEL[d]}** (${d}): ${DIMENSION_DESCRIPTION[d]}`,
   ).join("\n");
 
-  const transcriptBlock = input.qa
+  const questionsBlock = input.questions
     .map(
-      (qa, i) =>
-        `## Q${i + 1} [${qa.category}]\n${qa.question}\n\n**Candidate answer:**\n${truncate(qa.answer || "(no transcript captured)", 1500)}`,
+      (q, i) =>
+        `Q${i + 1} [${q.category}]: ${q.prompt}`,
     )
-    .join("\n\n");
+    .join("\n");
+
+  const transcriptBlock = input.transcriptLog
+    .map((t) => {
+      const tag = t.questionPosition
+        ? `[${t.speaker} · tagged Q${t.questionPosition}]`
+        : `[${t.speaker}]`;
+      return `${tag} ${truncate(t.content, 500)}`;
+    })
+    .join("\n");
+
+  const totalCandidateChars = input.transcriptLog
+    .filter((t) => t.speaker === "candidate")
+    .reduce((acc, t) => acc + t.content.length, 0);
+
+  const dataHint =
+    totalCandidateChars < 200
+      ? "\n\nNOTE: The candidate transcript is unusually short (<200 chars). This may mean: a) the interview was very brief, b) speaker labels are off (some candidate speech may be tagged as interviewer — trust content over label), or c) capture had issues. Lean toward lean_hire with low confidence rather than strong_no_hire."
+      : "";
 
   const userPrompt = [
     `Role: ${input.roleTitle}`,
@@ -186,8 +211,10 @@ export async function generateReport(input: ReportInput): Promise<GeneratedRepor
       ? `\n## Resume excerpt\n${truncate(input.resumeText, 4000)}`
       : "\nResume: (not supplied)",
     `\n## Dimensions to score\n${dimensionsBlock}`,
-    `\n## Interview transcript\n${transcriptBlock}`,
-    `\nProduce the report following the schema. Be specific and concrete.`,
+    `\n## Prepared questions\n${questionsBlock}`,
+    `\n## Chronological transcript log (speaker labels may be noisy)\n${truncate(transcriptBlock, 20000)}`,
+    dataHint,
+    `\nProduce the report following the schema. Be specific. Trust transcript content over noisy speaker labels.`,
   ].join("\n");
 
   const response = await ai.models.generateContent({

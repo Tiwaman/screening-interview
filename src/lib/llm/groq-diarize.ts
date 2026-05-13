@@ -8,13 +8,17 @@ export type DiarizedSegment = {
 
 const SYSTEM = `You split a transcript fragment from a screening interview into two speakers: INTERVIEWER and CANDIDATE.
 
-Heuristics:
-- INTERVIEWER asks questions, redirects, signals transitions ("tell me about", "can you elaborate", "moving on", "next question", "let's switch gears", "alright, so").
-- CANDIDATE answers, gives concrete examples or claims, says things like "in my last role", "I built", "we shipped", "the way I'd approach it".
-- A single chunk may contain only one speaker. Don't invent a second speaker if it isn't there.
-- If both speakers are present, split on the natural turn boundaries and return them in order.
-- Never edit, summarize, or paraphrase the text — copy each speaker's words verbatim from the transcript.
-- If the transcript is too short, silent, or unintelligible, return an empty array.
+Decision rules — apply in order:
+1. If the utterance is a QUESTION, a redirect, or a signal of transition ("tell me about", "can you elaborate", "what about", "moving on", "next question", "let's switch gears", "alright, so", "great", "thanks for that"), it's INTERVIEWER.
+2. If the utterance gives a SUBSTANTIVE ANSWER, an example, a claim about experience, or a description of how the speaker would do something ("in my last role", "I built", "we shipped", "the way I'd approach it", "for example", "what I'd do is"), it's CANDIDATE.
+3. If a previous speaker is provided as context, prefer continuity — the candidate's answer usually spans multiple chunks and isn't interrupted every 5 seconds.
+4. Acknowledgements like "mhm", "right", "got it" are typically the INTERVIEWER listening; if the previous speaker was CANDIDATE answering, they may also come from the candidate.
+
+Output rules:
+- A single chunk may contain only one speaker — return one segment.
+- If two speakers clearly take turns, return them in chronological order.
+- Never edit, summarize, or paraphrase. Copy verbatim from the transcript.
+- If the transcript is silent / unintelligible / a known Whisper hallucination, return an empty array.
 
 Output STRICT JSON only:
 { "segments": [{ "speaker": "interviewer" | "candidate", "text": string }, ...] }`;
@@ -31,12 +35,17 @@ const HALLUCINATION_PATTERNS = [
 
 export async function transcribeAndDiarizeWithGroq(
   audio: File | Blob,
+  previousSpeaker: "interviewer" | "candidate" | null = null,
 ): Promise<DiarizedSegment[]> {
   // 1. Plain transcript from Whisper.
   const text = await transcribeWithGroq(audio, "chunk.webm");
   if (!text) return [];
 
-  // 2. Ask Llama to split by speaker. Fast model is plenty for this.
+  const contextHint = previousSpeaker
+    ? `Previous chunk was attributed to: ${previousSpeaker.toUpperCase()}. Prefer continuity unless this fragment clearly belongs to the other speaker.`
+    : "No prior context — decide from content alone.";
+
+  // 2. Ask Llama to split by speaker.
   let raw: string;
   try {
     raw = await groqChat(
@@ -44,7 +53,7 @@ export async function transcribeAndDiarizeWithGroq(
         { role: "system", content: SYSTEM },
         {
           role: "user",
-          content: `Transcript fragment:\n"${text}"\n\nSplit by speaker per the rules.`,
+          content: `${contextHint}\n\nTranscript fragment:\n"${text}"\n\nSplit by speaker per the rules.`,
         },
       ],
       {
@@ -55,16 +64,14 @@ export async function transcribeAndDiarizeWithGroq(
       },
     );
   } catch {
-    // Fall back: attribute the whole chunk to candidate (most likely speaker
-    // by chunk length) so we don't lose the transcript entirely.
-    return [{ speaker: "candidate", text }];
+    return [{ speaker: previousSpeaker ?? "candidate", text }];
   }
 
   let parsed: { segments?: DiarizedSegment[] };
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [{ speaker: "candidate", text }];
+    return [{ speaker: previousSpeaker ?? "candidate", text }];
   }
 
   const segments = (parsed.segments ?? [])
@@ -81,10 +88,8 @@ export async function transcribeAndDiarizeWithGroq(
         !HALLUCINATION_PATTERNS.some((re) => re.test(s.text)),
     );
 
-  // If splitting failed somehow (empty array), preserve the raw transcript.
   if (segments.length === 0) {
-    return [{ speaker: "candidate", text }];
+    return [{ speaker: previousSpeaker ?? "candidate", text }];
   }
-
   return segments;
 }

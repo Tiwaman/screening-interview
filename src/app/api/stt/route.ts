@@ -49,11 +49,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Interview not found" }, { status: 404 });
   }
 
-  // ── SAME-ROOM: one mic, both voices, Gemini diarization ──────────────
+  // ── SAME-ROOM: one mic, both voices, Groq diarization ───────────────
   if (mode === "same-room") {
+    // Pull the previous speaker so the diarizer can prefer continuity.
+    const { data: prev } = await supabase
+      .from("transcripts")
+      .select("speaker")
+      .eq("interview_id", interviewId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<{ speaker: string }>();
+    const previousSpeaker =
+      prev?.speaker === "interviewer"
+        ? ("interviewer" as const)
+        : prev?.speaker === "candidate"
+          ? ("candidate" as const)
+          : null;
+
     let segments: DiarizedSegment[] = [];
     try {
-      segments = await transcribeAndDiarizeWithGroq(audio);
+      segments = await transcribeAndDiarizeWithGroq(audio, previousSpeaker);
     } catch (err) {
       return NextResponse.json(
         {

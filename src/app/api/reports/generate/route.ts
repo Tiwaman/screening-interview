@@ -39,41 +39,64 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Interview not found" }, { status: 404 });
   }
 
-  const { data: questions } = await supabase
+  const { data: questionsRaw } = await supabase
     .from("questions")
     .select("id, position, prompt, category")
     .eq("interview_id", interviewId)
     .order("position", { ascending: true });
 
-  if (!questions || questions.length === 0) {
+  const questions = (questionsRaw ?? []) as Array<{
+    id: string;
+    position: number;
+    prompt: string;
+    category: string;
+  }>;
+
+  if (questions.length === 0) {
     return NextResponse.json(
       { error: "No questions to score" },
       { status: 400 },
     );
   }
 
+  // Pull EVERY transcript chunk in chronological order, regardless of speaker
+  // tag. The LLM is asked to re-map content to questions and to trust content
+  // over labels — this makes us resilient to mislabeled chunks from same-room
+  // diarization or mis-clicked Next buttons.
   const { data: transcripts } = await supabase
     .from("transcripts")
     .select("question_id, content, speaker, created_at")
     .eq("interview_id", interviewId)
-    .eq("speaker", "candidate")
     .order("created_at", { ascending: true });
 
-  const answersByQuestion = new Map<string, string[]>();
-  (transcripts ?? []).forEach((t) => {
-    const qid = (t.question_id as string | null) ?? "";
-    if (!qid) return;
-    if (!answersByQuestion.has(qid)) answersByQuestion.set(qid, []);
-    answersByQuestion.get(qid)!.push((t.content as string) ?? "");
-  });
+  const qPosById = new Map<string, number>();
+  questions.forEach((q) => qPosById.set(q.id, q.position));
 
-  const qa = (questions as { id: string; prompt: string; category: string }[]).map(
-    (q) => ({
-      question: q.prompt,
-      category: q.category,
-      answer: (answersByQuestion.get(q.id) ?? []).join(" ").trim(),
-    }),
-  );
+  const transcriptLog = (transcripts ?? [])
+    .map((t) => {
+      const content = ((t.content as string) ?? "").trim();
+      if (!content) return null;
+      const qid = (t.question_id as string | null) ?? null;
+      return {
+        speaker:
+          (t.speaker as string) === "interviewer"
+            ? ("interviewer" as const)
+            : ("candidate" as const),
+        content,
+        question_id: qid,
+        questionPosition: qid ? (qPosById.get(qid) ?? null) : null,
+      };
+    })
+    .filter(
+      (
+        x,
+      ): x is {
+        speaker: "interviewer" | "candidate";
+        content: string;
+        question_id: string | null;
+        questionPosition: number | null;
+      } => x !== null,
+    );
 
   let report;
   try {
@@ -82,7 +105,12 @@ export async function POST(request: Request) {
       seniority: interview.seniority as Seniority,
       jdText: interview.jd_text,
       resumeText: interview.resume_parsed?.text ?? null,
-      qa,
+      questions: questions.map((q) => ({
+        position: q.position,
+        prompt: q.prompt,
+        category: q.category,
+      })),
+      transcriptLog,
     });
   } catch (err) {
     return NextResponse.json(
