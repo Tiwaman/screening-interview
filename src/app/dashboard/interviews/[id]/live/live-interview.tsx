@@ -21,19 +21,32 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 const CHUNK_MS = 3000;
-const SILENCE_TRIGGER_MS = 6000; // after this much idle since last chunk, suggest a follow-up
-const MIN_ANSWER_LEN = 30; // skip follow-up suggestion if answer is too short
+const SILENCE_TRIGGER_MS = 6000;
+const MIN_ANSWER_LEN = 30;
+const MATCH_CONFIDENCE_THRESHOLD = 0.65;
+
+type Speaker = "candidate" | "interviewer";
 
 type ChunkEntry = {
   text: string;
+  speaker: Speaker;
   questionId: string | null;
   receivedAt: number;
+  offScript?: boolean;
 };
 
 type Suggestion = {
   prompt: string;
   reason: string;
   forQuestionId: string;
+};
+
+type MatchResult = {
+  matched_question_id: string | null;
+  confidence: number;
+  is_off_script: boolean;
+  signaled_advance: boolean;
+  reasoning: string;
 };
 
 export function LiveInterview({
@@ -55,28 +68,48 @@ export function LiveInterview({
   const [skippedFor, setSkippedFor] = useState<Set<string>>(new Set());
   const [generatingReport, setGeneratingReport] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(false);
-  const [consentGiven, setConsentGiven] = useState(false);
+  const [autoAdvance, setAutoAdvance] = useState(true);
+  const [micGranted, setMicGranted] = useState(false);
+  const [advanceToast, setAdvanceToast] = useState<string | null>(null);
+
   const tts = useTts();
   const lastSpokenIdRef = useRef<string | null>(null);
 
-  const streamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
+  // Candidate (tab) capture
+  const tabStreamRef = useRef<MediaStream | null>(null);
+  const tabRecorderRef = useRef<MediaRecorder | null>(null);
+  const tabChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Interviewer (mic) capture
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micRecorderRef = useRef<MediaRecorder | null>(null);
+  const micChunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const chunkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stoppingRef = useRef(false);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const currentQuestionIdRef = useRef<string | null>(
     initialQuestions[0]?.id ?? null,
   );
+  const questionsRef = useRef<Question[]>(initialQuestions);
+  const currentIdxRef = useRef(0);
+  const autoAdvanceRef = useRef(autoAdvance);
+  const lastMatchedRef = useRef<string | null>(null);
+
   const transcriptEndRef = useRef<HTMLDivElement>(null);
   const lastEvaluatedAnswerRef = useRef<Record<string, string>>({});
 
   const current = questions[currentIdx];
+
   useEffect(() => {
+    questionsRef.current = questions;
+  }, [questions]);
+
+  useEffect(() => {
+    currentIdxRef.current = currentIdx;
     currentQuestionIdRef.current = current?.id ?? null;
-    // Clear any stale suggestion when question changes.
     setSuggestion(null);
-    // Auto-speak the new question when toggle is on.
     if (
       autoSpeak &&
       tts.supported &&
@@ -90,21 +123,25 @@ export function LiveInterview({
   }, [current, autoSpeak]);
 
   useEffect(() => {
+    autoAdvanceRef.current = autoAdvance;
+  }, [autoAdvance]);
+
+  useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chunks.length]);
 
   useEffect(() => {
-    return () => {
-      stopCapture();
-    };
+    return () => stopCapture();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Restart silence timer whenever a chunk arrives for the current question.
+  // ── End-of-answer detection (candidate only) ──────────────────────────
   useEffect(() => {
     if (!recording || !current) return;
-    const lastChunk = chunks[chunks.length - 1];
-    if (!lastChunk || lastChunk.questionId !== current.id) return;
+    const lastCandidateChunk = [...chunks]
+      .reverse()
+      .find((c) => c.speaker === "candidate" && c.questionId === current.id);
+    if (!lastCandidateChunk) return;
 
     if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
     silenceTimerRef.current = setTimeout(() => {
@@ -117,10 +154,11 @@ export function LiveInterview({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chunks, recording, current]);
 
+  // ── Answer + follow-up suggestion ─────────────────────────────────────
   function answerForCurrent(): string {
     if (!current) return "";
     return chunks
-      .filter((c) => c.questionId === current.id)
+      .filter((c) => c.speaker === "candidate" && c.questionId === current.id)
       .map((c) => c.text)
       .join(" ")
       .trim();
@@ -147,11 +185,7 @@ export function LiveInterview({
           answer,
         }),
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        console.warn("[followup] error", res.status, body);
-        return;
-      }
+      if (!res.ok) return;
       const data = (await res.json()) as {
         askFollowup: boolean;
         prompt: string | null;
@@ -164,8 +198,8 @@ export function LiveInterview({
           forQuestionId: current.id,
         });
       }
-    } catch (err) {
-      console.warn("[followup] failed", err);
+    } catch {
+      /* swallow */
     } finally {
       setSuggesting(false);
     }
@@ -192,7 +226,6 @@ export function LiveInterview({
         return;
       }
       const { question } = (await res.json()) as { question: Question };
-      // Insert immediately after the parent in the local array, then jump to it.
       setQuestions((prev) => {
         const parentIdx = prev.findIndex((q) => q.id === parentId);
         if (parentIdx === -1) return [...prev, question];
@@ -215,108 +248,229 @@ export function LiveInterview({
     setSuggestion(null);
   }
 
-  async function uploadChunk(blob: Blob) {
-    if (blob.size < 1_000) return;
+  // ── STT upload ────────────────────────────────────────────────────────
+  async function uploadChunk(blob: Blob, speaker: Speaker) {
+    if (blob.size < 1_000) return null;
     const fd = new FormData();
-    fd.set("audio", blob, "chunk.webm");
+    fd.set("audio", blob, `chunk-${speaker}.webm`);
     fd.set("interview_id", interviewId);
-    if (currentQuestionIdRef.current) {
-      fd.set("question_id", currentQuestionIdRef.current);
-    }
+    fd.set("speaker", speaker);
+    const questionId =
+      speaker === "candidate" ? currentQuestionIdRef.current : null;
+    if (questionId) fd.set("question_id", questionId);
+
     try {
       const res = await fetch("/api/stt", { method: "POST", body: fd });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
         setError(`STT ${res.status}: ${body || "request failed"}`);
-        return;
+        return null;
       }
       const data = (await res.json()) as { transcript?: string };
-      if (data.transcript) {
-        setChunks((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.text === data.transcript) return prev;
-          return [
-            ...prev,
-            {
-              text: data.transcript!,
-              questionId: currentQuestionIdRef.current,
-              receivedAt: Date.now(),
-            },
-          ];
-        });
-      }
+      return data.transcript ?? "";
     } catch (err) {
       setError(err instanceof Error ? err.message : "STT request failed");
+      return null;
     }
   }
 
-  async function startCapture() {
-    if (!consentGiven) {
-      setError("Please confirm candidate consent before recording.");
-      return;
+  async function handleChunk(blob: Blob, speaker: Speaker) {
+    const text = await uploadChunk(blob, speaker);
+    if (!text) return;
+
+    setChunks((prev) => {
+      const lastForSpeaker = [...prev]
+        .reverse()
+        .find((c) => c.speaker === speaker);
+      if (lastForSpeaker && lastForSpeaker.text === text) return prev;
+      return [
+        ...prev,
+        {
+          text,
+          speaker,
+          questionId:
+            speaker === "candidate" ? currentQuestionIdRef.current : null,
+          receivedAt: Date.now(),
+        },
+      ];
+    });
+
+    if (speaker === "interviewer") {
+      void runMatcher(text);
     }
+  }
+
+  // ── Interviewer-to-question matcher + auto-advance ────────────────────
+  async function runMatcher(snippet: string) {
+    if (!autoAdvanceRef.current) return;
+    if (snippet.length < 4) return;
+    try {
+      const res = await fetch("/api/interviewer-match", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          interviewId,
+          snippet,
+          currentQuestionId: currentQuestionIdRef.current,
+        }),
+      });
+      if (!res.ok) return;
+      const result = (await res.json()) as MatchResult;
+
+      if (result.is_off_script) {
+        // Tag the most recent interviewer chunk as off-script
+        setChunks((prev) => {
+          const next = [...prev];
+          for (let i = next.length - 1; i >= 0; i--) {
+            if (next[i].speaker === "interviewer") {
+              next[i] = { ...next[i], offScript: true };
+              break;
+            }
+          }
+          return next;
+        });
+        return;
+      }
+
+      if (
+        result.matched_question_id &&
+        result.confidence >= MATCH_CONFIDENCE_THRESHOLD &&
+        result.matched_question_id !== currentQuestionIdRef.current &&
+        result.matched_question_id !== lastMatchedRef.current
+      ) {
+        const qs = questionsRef.current;
+        const targetIdx = qs.findIndex(
+          (q) => q.id === result.matched_question_id,
+        );
+        if (targetIdx < 0) return;
+        // Only advance forward unless explicitly signaled
+        if (
+          targetIdx <= currentIdxRef.current &&
+          !result.signaled_advance
+        ) {
+          return;
+        }
+        lastMatchedRef.current = result.matched_question_id;
+        setCurrentIdx(targetIdx);
+        currentQuestionIdRef.current = qs[targetIdx].id;
+        setAdvanceToast(`Q${targetIdx + 1} · ${qs[targetIdx].prompt.slice(0, 60)}${qs[targetIdx].prompt.length > 60 ? "…" : ""}`);
+        setTimeout(() => setAdvanceToast(null), 3500);
+      }
+    } catch {
+      /* matcher failures are non-fatal */
+    }
+  }
+
+  // ── Capture lifecycle ─────────────────────────────────────────────────
+  async function startCapture() {
     setError(null);
     setStarting(true);
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
+      // 1. Mic (interviewer) — request first; it's a smaller commitment
+      let micStream: MediaStream | null = null;
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        setMicGranted(true);
+      } catch (err) {
+        setMicGranted(false);
+        console.warn("[live] mic denied", err);
+        setError(
+          "Mic permission denied — auto-advance and off-script detection won't run. You can still capture candidate audio.",
+        );
+      }
+
+      // 2. Tab (candidate)
+      const tabStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: true,
       });
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        stream.getTracks().forEach((t) => t.stop());
+      const tabAudio = tabStream.getAudioTracks();
+      if (tabAudio.length === 0) {
+        tabStream.getTracks().forEach((t) => t.stop());
+        micStream?.getTracks().forEach((t) => t.stop());
         throw new Error(
-          "No audio track shared. When the picker appears, choose a tab and check 'Share tab audio'.",
+          "No tab audio shared. Pick the meeting tab and tick 'Share tab audio'.",
         );
       }
-      stream.getVideoTracks().forEach((t) => t.stop());
-      const audioStream = new MediaStream(audioTracks);
+      tabStream.getVideoTracks().forEach((t) => t.stop());
+      const tabAudioStream = new MediaStream(tabAudio);
 
+      // Pipe tab audio back to speakers so the call still plays normally.
       const ctx = new AudioContext();
       audioCtxRef.current = ctx;
-      const source = ctx.createMediaStreamSource(audioStream);
-      source.connect(ctx.destination);
+      ctx
+        .createMediaStreamSource(tabAudioStream)
+        .connect(ctx.destination);
 
-      streamRef.current = audioStream;
+      tabStreamRef.current = tabAudioStream;
+      tabAudio.forEach((t) => (t.onended = () => stopCapture()));
+
+      if (micStream) {
+        micStreamRef.current = micStream;
+        micStream
+          .getAudioTracks()
+          .forEach((t) => (t.onended = () => stopCapture()));
+      }
+
       stoppingRef.current = false;
-
-      audioTracks.forEach((track) => {
-        track.onended = () => stopCapture();
-      });
-
       setRecording(true);
-      startChunkCycle();
+      startTabChunkCycle();
+      if (micStream) startMicChunkCycle();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to start screen share",
+        err instanceof Error ? err.message : "Failed to start capture",
       );
     } finally {
       setStarting(false);
     }
   }
 
-  function startChunkCycle() {
-    const stream = streamRef.current;
+  function startTabChunkCycle() {
+    const stream = tabStreamRef.current;
     if (!stream || stoppingRef.current) return;
-
     const blobs: Blob[] = [];
     const recorder = new MediaRecorder(stream, {
       mimeType: "audio/webm;codecs=opus",
     });
-    recorderRef.current = recorder;
-
-    recorder.ondataavailable = (event) => {
-      if (event.data && event.data.size > 0) blobs.push(event.data);
+    tabRecorderRef.current = recorder;
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) blobs.push(e.data);
     };
-    recorder.onerror = (e) => console.error("[stt] recorder error", e);
     recorder.onstop = () => {
       const blob = new Blob(blobs, { type: "audio/webm;codecs=opus" });
-      if (blob.size > 0) void uploadChunk(blob);
-      if (!stoppingRef.current) startChunkCycle();
+      if (blob.size > 0) void handleChunk(blob, "candidate");
+      if (!stoppingRef.current) startTabChunkCycle();
     };
-
     recorder.start();
-    chunkTimerRef.current = setTimeout(() => {
+    tabChunkTimerRef.current = setTimeout(() => {
+      if (recorder.state === "recording") recorder.stop();
+    }, CHUNK_MS);
+  }
+
+  function startMicChunkCycle() {
+    const stream = micStreamRef.current;
+    if (!stream || stoppingRef.current) return;
+    const blobs: Blob[] = [];
+    const recorder = new MediaRecorder(stream, {
+      mimeType: "audio/webm;codecs=opus",
+    });
+    micRecorderRef.current = recorder;
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) blobs.push(e.data);
+    };
+    recorder.onstop = () => {
+      const blob = new Blob(blobs, { type: "audio/webm;codecs=opus" });
+      if (blob.size > 0) void handleChunk(blob, "interviewer");
+      if (!stoppingRef.current) startMicChunkCycle();
+    };
+    recorder.start();
+    micChunkTimerRef.current = setTimeout(() => {
       if (recorder.state === "recording") recorder.stop();
     }, CHUNK_MS);
   }
@@ -324,23 +478,23 @@ export function LiveInterview({
   function stopCapture() {
     stoppingRef.current = true;
 
-    if (chunkTimerRef.current) {
-      clearTimeout(chunkTimerRef.current);
-      chunkTimerRef.current = null;
-    }
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
+    [tabChunkTimerRef, micChunkTimerRef, silenceTimerRef].forEach((ref) => {
+      if (ref.current) {
+        clearTimeout(ref.current);
+        ref.current = null;
+      }
+    });
 
-    const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.stop();
-    }
-    recorderRef.current = null;
+    [tabRecorderRef, micRecorderRef].forEach((ref) => {
+      const r = ref.current;
+      if (r && r.state !== "inactive") r.stop();
+      ref.current = null;
+    });
 
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
+    tabStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    tabStreamRef.current = null;
+    micStreamRef.current = null;
 
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
@@ -386,14 +540,23 @@ export function LiveInterview({
     currentQuestionIdRef.current = questions[prev].id;
   }
 
-  const currentChunks = chunks.filter(
-    (c) => current && c.questionId === current.id,
+  // ── Derived ───────────────────────────────────────────────────────────
+  const candidateChunksForCurrent = chunks.filter(
+    (c) => c.speaker === "candidate" && current && c.questionId === current.id,
   );
-  const transcriptText = currentChunks.map((c) => c.text).join(" ");
+  const transcriptText = candidateChunksForCurrent
+    .map((c) => c.text)
+    .join(" ");
   const answerLen = transcriptText.length;
 
   return (
     <div className="space-y-5">
+      {advanceToast && (
+        <div className="fixed left-1/2 top-6 z-50 -translate-x-1/2 rounded-full bg-emerald-600 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          ↪ Auto-advanced: {advanceToast}
+        </div>
+      )}
+
       {error && (
         <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
           {error}
@@ -402,49 +565,65 @@ export function LiveInterview({
 
       {!recording && (
         <div className="rounded-2xl border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-950">
-          <h2 className="text-sm font-semibold">Start by sharing the meeting tab</h2>
+          <h2 className="text-sm font-semibold">Start the live interview</h2>
           <ol className="mt-2 list-inside list-decimal space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
             <li>
-              Click <span className="font-medium">Start sharing</span> below.
+              <span className="font-medium">Allow microphone</span> when
+              prompted — the agent listens to your prompts and auto-advances
+              the question card.
             </li>
             <li>
-              In Chrome&apos;s picker, select your meeting tab (Meet / Zoom /
-              Teams).
-            </li>
-            <li>
+              Then pick your <span className="font-medium">meeting tab</span>{" "}
+              in Chrome&apos;s share picker and{" "}
               <span className="font-medium">
-                Tick the &ldquo;Share tab audio&rdquo; checkbox
+                tick &ldquo;Share tab audio&rdquo;
               </span>{" "}
-              before clicking Share.
+              to capture the candidate.
             </li>
             <li>
-              Audio is captured locally, transcribed, and the agent suggests
-              follow-ups in real time.
+              Audio is transcribed live. Follow-ups surface in the margin.
             </li>
           </ol>
-
-          <label className="mt-4 flex cursor-pointer gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-relaxed text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-            <input
-              type="checkbox"
-              checked={consentGiven}
-              onChange={(e) => setConsentGiven(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              I confirm the candidate has been informed and consents to having
-              their answers recorded and transcribed by AI for evaluation
-              purposes. (Required by law in many jurisdictions.)
-            </span>
-          </label>
-
           <button
             type="button"
-            disabled={starting || !consentGiven}
+            disabled={starting}
             onClick={startCapture}
             className="mt-4 w-full rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
           >
-            {starting ? "Waiting for tab share…" : "▶ Start sharing"}
+            {starting ? "Waiting…" : "▶ Start sharing"}
           </button>
+        </div>
+      )}
+
+      {recording && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-3 py-2 text-[11px] dark:border-zinc-800 dark:bg-zinc-950">
+          <span className="inline-flex items-center gap-1 text-emerald-600">
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" />
+            Candidate · capturing tab
+          </span>
+          <span
+            className={`inline-flex items-center gap-1 ${
+              micGranted ? "text-amber-600" : "text-zinc-400 line-through"
+            }`}
+          >
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                micGranted ? "animate-pulse bg-amber-500" : "bg-zinc-400"
+              }`}
+            />
+            Interviewer · {micGranted ? "mic on" : "mic off"}
+          </span>
+          {micGranted && (
+            <label className="ml-auto flex cursor-pointer items-center gap-1.5 text-zinc-600 dark:text-zinc-400">
+              <input
+                type="checkbox"
+                checked={autoAdvance}
+                onChange={(e) => setAutoAdvance(e.target.checked)}
+                className="rounded"
+              />
+              Auto-advance on my prompts
+            </label>
+          )}
         </div>
       )}
 
@@ -568,9 +747,10 @@ export function LiveInterview({
         </div>
       )}
 
+      {/* Per-question candidate transcript */}
       <div>
         <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Transcript
+          Candidate&apos;s answer
           {recording && (
             <span className="inline-flex items-center gap-1 text-emerald-600">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-600" />
@@ -578,44 +758,64 @@ export function LiveInterview({
             </span>
           )}
         </h3>
-        <div className="max-h-96 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-4 text-sm leading-relaxed text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
+        <div className="max-h-72 overflow-y-auto rounded-lg border border-zinc-200 bg-white p-4 text-sm leading-relaxed text-zinc-800 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
           {transcriptText ? (
             <p className="whitespace-pre-wrap">{transcriptText}</p>
           ) : (
             <p className="italic text-zinc-400 dark:text-zinc-500">
               {recording
-                ? "Listening… transcript will appear here every few seconds."
+                ? "Listening for the candidate…"
                 : "No transcript yet for this question."}
             </p>
           )}
-          <div ref={transcriptEndRef} />
         </div>
       </div>
 
+      {/* Combined two-speaker stream */}
       {chunks.length > 0 && (
-        <details className="rounded-2xl border border-zinc-200 bg-white p-4 text-xs dark:border-zinc-800 dark:bg-zinc-950">
-          <summary className="cursor-pointer font-medium text-zinc-700 dark:text-zinc-300">
-            Full transcript history ({chunks.length} chunks)
+        <details className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
+          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-zinc-500">
+            Live transcript · both speakers ({chunks.length} chunks)
           </summary>
           <ul className="mt-3 space-y-2">
             {chunks.map((c, i) => (
               <li
                 key={i}
-                className="rounded-md bg-zinc-50 px-3 py-2 dark:bg-zinc-900"
+                className={`rounded-md px-3 py-2 ${
+                  c.speaker === "interviewer"
+                    ? "border-l-2 border-amber-400 bg-amber-50/60 dark:bg-amber-950/40"
+                    : "border-l-2 border-emerald-400 bg-emerald-50/60 dark:bg-emerald-950/40"
+                }`}
               >
-                <p className="text-[10px] uppercase tracking-wide text-zinc-400">
-                  {questions.find((q) => q.id === c.questionId)
-                    ? `Q${
-                        questions.findIndex((q) => q.id === c.questionId) + 1
-                      }`
-                    : "—"}{" "}
-                  · {new Date(c.receivedAt).toLocaleTimeString()}
+                <p className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-500">
+                  <span
+                    className={
+                      c.speaker === "interviewer"
+                        ? "font-semibold text-amber-700 dark:text-amber-300"
+                        : "font-semibold text-emerald-700 dark:text-emerald-300"
+                    }
+                  >
+                    {c.speaker}
+                  </span>
+                  <span>· {new Date(c.receivedAt).toLocaleTimeString()}</span>
+                  {c.questionId && (
+                    <span>
+                      · Q
+                      {questions.findIndex((q) => q.id === c.questionId) + 1}
+                    </span>
+                  )}
+                  {c.offScript && (
+                    <span className="ml-auto rounded-full bg-amber-200 px-1.5 py-0.5 text-[9px] font-semibold text-amber-900 dark:bg-amber-800 dark:text-amber-100">
+                      off-script
+                    </span>
+                  )}
                 </p>
-                <p className="mt-1 text-zinc-700 dark:text-zinc-300">
+                <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
                   {c.text}
                 </p>
               </li>
             ))}
+            <div ref={transcriptEndRef} />
           </ul>
         </details>
       )}
