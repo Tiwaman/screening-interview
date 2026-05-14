@@ -3,26 +3,47 @@ import { IntakeForm } from "./intake-form";
 
 export default function NewInterviewPage() {
   return (
-    <div className="mx-auto max-w-2xl space-y-8">
-      <div className="space-y-1">
+    <div className="grid grid-cols-12 gap-10">
+      <aside className="col-span-12 lg:col-span-4">
         <Link
           href="/dashboard"
-          className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="text-[12px] text-ink-muted ink-link"
         >
           ← Back to interviews
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          New interview
+        <p className="chapter-mark mt-6 text-[36px]">§</p>
+        <h1 className="mt-2 font-display text-[44px] leading-[1.02] tracking-tight">
+          New
+          <br />
+          <span className="font-display-italic text-accent">interview.</span>
         </h1>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          Only role title and seniority are required. Adding a JD or candidate
-          resume sharpens question generation.
+        <p className="mt-5 max-w-[36ch] text-[15px] leading-relaxed text-ink-soft">
+          Role title and seniority are required. Drop in a JD or resume if you
+          have them — the questions get sharper with each.
         </p>
-      </div>
 
-      <div className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+        <div className="mt-10 space-y-4 border-t border-rule pt-6">
+          <p className="eyebrow">What happens next</p>
+          <ol className="space-y-2 text-[13px] leading-relaxed text-ink-soft">
+            <li>
+              <span className="numeral mr-2 text-accent">01</span>
+              We parse the resume, if attached.
+            </li>
+            <li>
+              <span className="numeral mr-2 text-accent">02</span>
+              You land on the interview page.
+            </li>
+            <li>
+              <span className="numeral mr-2 text-accent">03</span>
+              Click <em>Generate</em> to draft a question set.
+            </li>
+          </ol>
+        </div>
+      </aside>
+
+      <section className="col-span-12 lg:col-span-8">
         <IntakeForm />
-      </div>
+      </section>
     </div>
   );
 }

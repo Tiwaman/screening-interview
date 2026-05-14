@@ -3,7 +3,22 @@ import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { SENIORITY_LABELS, type Seniority } from "@/lib/types";
 import { QuestionsPanel } from "./questions-panel";
-import { DeleteInterviewButton } from "./delete-button";
+
+const STATUS_LABEL: Record<string, string> = {
+  draft: "Draft",
+  ready: "Ready",
+  live: "Live",
+  completed: "Completed",
+  archived: "Archived",
+};
+
+const STATUS_TONE: Record<string, string> = {
+  draft: "text-ink-muted",
+  ready: "text-emerald-grove",
+  live: "text-accent",
+  completed: "text-ink-soft",
+  archived: "text-ink-muted/70",
+};
 
 export default async function InterviewDetailPage({
   params,
@@ -19,9 +34,7 @@ export default async function InterviewDetailPage({
     .eq("id", id)
     .single();
 
-  if (error || !interview) {
-    notFound();
-  }
+  if (error || !interview) notFound();
 
   const { data: questionsRaw } = await supabase
     .from("questions")
@@ -45,96 +58,89 @@ export default async function InterviewDetailPage({
       : null;
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8">
-      <div className="space-y-1">
+    <div className="space-y-10">
+      <header className="space-y-6 border-b border-rule pb-8">
         <Link
           href="/dashboard"
-          className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="text-[12px] text-ink-muted ink-link"
         >
           ← Back to interviews
         </Link>
-        <div className="flex items-end justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">
+
+        <div className="grid grid-cols-12 items-end gap-6">
+          <div className="col-span-12 lg:col-span-8">
+            <p className="eyebrow">
+              {SENIORITY_LABELS[interview.seniority as Seniority]} ·{" "}
+              <span className={STATUS_TONE[interview.status] ?? ""}>
+                {STATUS_LABEL[interview.status] ?? interview.status}
+              </span>
+            </p>
+            <h1 className="mt-3 font-display text-[56px] leading-[0.95] tracking-tight">
               {interview.role_title}
             </h1>
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              {SENIORITY_LABELS[interview.seniority as Seniority]} · status{" "}
-              <span className="font-medium">{interview.status}</span>
-            </p>
           </div>
           {questions.length > 0 && (
-            <div className="flex items-center gap-2">
-              <Link
-                href={`/dashboard/interviews/${id}/live`}
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
-              >
-                ▶ Start live
-              </Link>
+            <div className="col-span-12 flex items-center gap-3 lg:col-span-4 lg:justify-end">
               <Link
                 href={`/dashboard/interviews/${id}/report`}
-                className="rounded-lg border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                className="border border-rule px-4 py-2 text-[13px] font-medium text-ink-soft transition-colors hover:border-ink hover:text-ink"
               >
                 Report
+              </Link>
+              <Link
+                href={`/dashboard/interviews/${id}/live`}
+                className="border border-ink bg-ink px-5 py-2.5 text-[13px] font-medium text-canvas transition-colors hover:bg-accent hover:border-accent"
+              >
+                ▶ Start live
               </Link>
             </div>
           )}
         </div>
-      </div>
+      </header>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <Card label="Job description">
-          {interview.jd_text ? (
-            <pre className="max-h-48 overflow-auto whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
-              {interview.jd_text}
-            </pre>
-          ) : (
-            <Empty>No JD provided.</Empty>
-          )}
-        </Card>
+      <section className="grid grid-cols-12 gap-8">
+        <div className="col-span-12 sm:col-span-7">
+          <p className="eyebrow">Job description</p>
+          <div className="mt-3 border-l-2 border-rule pl-4">
+            {interview.jd_text ? (
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap font-sans text-[13px] leading-relaxed text-ink-soft">
+                {interview.jd_text}
+              </pre>
+            ) : (
+              <p className="text-[13px] italic text-ink-muted">
+                No JD provided.
+              </p>
+            )}
+          </div>
+        </div>
 
-        <Card label="Resume">
-          {resumeChars !== null ? (
-            <p className="text-sm text-zinc-700 dark:text-zinc-300">
-              Parsed {resumeChars.toLocaleString()} characters from{" "}
-              {interview.resume_parsed?.source?.toUpperCase() ?? "file"}.
-            </p>
-          ) : (
-            <Empty>No resume uploaded.</Empty>
-          )}
-        </Card>
-      </div>
+        <div className="col-span-12 sm:col-span-5">
+          <p className="eyebrow">Resume</p>
+          <div className="mt-3 border-l-2 border-rule pl-4">
+            {resumeChars !== null ? (
+              <p className="text-[13px] leading-relaxed text-ink-soft">
+                Parsed{" "}
+                <span className="font-mono text-ink">
+                  {resumeChars.toLocaleString()}
+                </span>{" "}
+                characters from{" "}
+                <span className="font-mono">
+                  {interview.resume_parsed?.source?.toUpperCase() ?? "file"}
+                </span>
+                .
+              </p>
+            ) : (
+              <p className="text-[13px] italic text-ink-muted">
+                No resume uploaded.
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <hr className="rule" />
 
       <QuestionsPanel interviewId={id} questions={questions} />
-
-      <div className="flex justify-end pt-4">
-        <DeleteInterviewButton interviewId={id} />
-      </div>
     </div>
-  );
-}
-
-function Card({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
-      <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-        {label}
-      </h2>
-      {children}
-    </section>
-  );
-}
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="text-sm italic text-zinc-400 dark:text-zinc-500">
-      {children}
-    </p>
   );
 }

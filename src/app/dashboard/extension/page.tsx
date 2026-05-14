@@ -10,22 +10,24 @@ export default async function ExtensionPage() {
     .order("created_at", { ascending: false });
 
   return (
-    <div className="mx-auto max-w-2xl space-y-8">
-      <div className="space-y-1">
+    <div className="mx-auto max-w-3xl space-y-10">
+      <header className="space-y-3 border-b border-rule pb-8">
         <Link
           href="/dashboard"
-          className="text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="text-[12px] text-ink-muted ink-link"
         >
           ← Back to interviews
         </Link>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Browser extension
+        <p className="eyebrow">Personal access</p>
+        <h1 className="font-display text-[44px] leading-[1.02] tracking-tight">
+          Browser{" "}
+          <span className="font-display-italic text-accent">extension.</span>
         </h1>
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+        <p className="max-w-[60ch] text-[15px] leading-relaxed text-ink-soft">
           The extension talks to your account through a personal access token.
-          Generate one, paste it into the extension, and you&apos;re connected.
+          Generate one, paste it into the side panel, and the two are linked.
         </p>
-      </div>
+      </header>
 
       <TokenManager tokens={data ?? []} />
     </div>

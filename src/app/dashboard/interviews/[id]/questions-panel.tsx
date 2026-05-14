@@ -26,16 +26,11 @@ const CATEGORY_LABEL: Record<string, string> = {
 };
 
 const CATEGORY_TONE: Record<string, string> = {
-  technical:
-    "bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300",
-  behavioral:
-    "bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300",
-  resume_probe:
-    "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300",
-  role_specific:
-    "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300",
-  followup:
-    "bg-zinc-100 text-zinc-800 dark:bg-zinc-800 dark:text-zinc-300",
+  technical: "text-emerald-grove",
+  behavioral: "text-accent",
+  resume_probe: "text-amber-700",
+  role_specific: "text-ink-soft",
+  followup: "text-ink-muted",
 };
 
 export function QuestionsPanel({
@@ -58,33 +53,42 @@ export function QuestionsPanel({
 
   if (questions.length === 0) {
     return (
-      <div className="rounded-2xl border border-dashed border-zinc-300 bg-white p-8 text-center dark:border-zinc-700 dark:bg-zinc-950">
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">
-          No questions generated yet.
+      <div className="border border-dashed border-rule px-8 py-16 text-center">
+        <p className="chapter-mark text-[28px]">§</p>
+        <h2 className="mt-2 font-display text-[28px]">
+          No questions yet.
+        </h2>
+        <p className="mt-3 max-w-[40ch] mx-auto text-[13px] leading-relaxed text-ink-muted">
+          Generate eight to twelve role-aware questions. Edit, reorder, or
+          delete anything that doesn&apos;t fit.
         </p>
         <button
           type="button"
           disabled={pending}
-          onClick={() =>
-            run(() => generateQuestionsAction(interviewId))
-          }
-          className="mt-4 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+          onClick={() => run(() => generateQuestionsAction(interviewId))}
+          className="mt-6 border border-ink bg-ink px-5 py-2.5 text-[13px] font-medium text-canvas transition-colors hover:bg-accent hover:border-accent disabled:opacity-50"
         >
-          {pending ? "Generating…" : "Generate questions with AI"}
+          {pending ? "Generating…" : "Generate questions →"}
         </button>
         {error && (
-          <p className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</p>
+          <p className="mt-4 text-[13px] text-accent">{error}</p>
         )}
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold tracking-tight">
-          Questions ({questions.length})
-        </h2>
+    <section className="space-y-6">
+      <div className="flex items-end justify-between gap-4">
+        <div>
+          <p className="eyebrow">§ Questions</p>
+          <h2 className="mt-1 font-display text-[32px] leading-tight">
+            The set ·{" "}
+            <span className="font-display-italic text-accent">
+              {questions.length}
+            </span>
+          </h2>
+        </div>
         <button
           type="button"
           disabled={pending}
@@ -97,19 +101,19 @@ export function QuestionsPanel({
               return;
             run(() => generateQuestionsAction(interviewId));
           }}
-          className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+          className="border border-rule px-3 py-1.5 text-[12px] font-medium text-ink-soft transition-colors hover:border-ink hover:text-ink disabled:opacity-50"
         >
           {pending ? "Working…" : "Regenerate"}
         </button>
       </div>
 
       {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
+        <div className="border-l-2 border-accent bg-canvas-deep/40 p-3 text-[13px] text-accent">
           {error}
         </div>
       )}
 
-      <ul className="space-y-3">
+      <ol className="border-t border-rule">
         {questions.map((q, idx) => (
           <QuestionItem
             key={q.id}
@@ -117,21 +121,16 @@ export function QuestionsPanel({
             isFirst={idx === 0}
             isLast={idx === questions.length - 1}
             disabled={pending}
-            onSave={(prompt) =>
-              run(() => updateQuestionAction(q.id, prompt))
-            }
+            onSave={(prompt) => run(() => updateQuestionAction(q.id, prompt))}
             onDelete={() => {
-              if (
-                !window.confirm("Delete this question?")
-              )
-                return;
+              if (!window.confirm("Delete this question?")) return;
               run(() => deleteQuestionAction(q.id));
             }}
             onMove={(dir) => run(() => moveQuestionAction(q.id, dir))}
           />
         ))}
-      </ul>
-    </div>
+      </ol>
+    </section>
   );
 }
 
@@ -156,96 +155,97 @@ function QuestionItem({
   const [draft, setDraft] = useState(question.prompt);
 
   return (
-    <li className="rounded-2xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="font-mono text-zinc-400">
-            Q{question.position}
-          </span>
+    <li className="grid grid-cols-12 items-start gap-4 border-b border-rule py-5">
+      <div className="col-span-1">
+        <span className="numeral text-[18px] text-accent">
+          {String(question.position).padStart(2, "0")}
+        </span>
+      </div>
+
+      <div className="col-span-10">
+        <div className="flex flex-wrap items-baseline gap-3">
           <span
-            className={`rounded-full px-2 py-0.5 font-medium ${
-              CATEGORY_TONE[question.category] ?? CATEGORY_TONE.followup
+            className={`eyebrow ${
+              CATEGORY_TONE[question.category] ?? "text-ink-muted"
             }`}
           >
             {CATEGORY_LABEL[question.category] ?? question.category}
           </span>
           {question.difficulty && (
-            <span className="rounded-full bg-zinc-100 px-2 py-0.5 font-medium capitalize text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+            <span className="text-[10px] uppercase tracking-wide text-ink-muted">
               {question.difficulty}
             </span>
           )}
           {question.edited && (
-            <span className="text-xs italic text-zinc-400">edited</span>
+            <span className="text-[10px] italic text-ink-muted/70">
+              edited
+            </span>
           )}
         </div>
 
-        <div className="flex items-center gap-1">
-          <IconBtn
-            label="Move up"
-            disabled={disabled || isFirst}
-            onClick={() => onMove("up")}
-          >
-            ↑
-          </IconBtn>
-          <IconBtn
-            label="Move down"
-            disabled={disabled || isLast}
-            onClick={() => onMove("down")}
-          >
-            ↓
-          </IconBtn>
-          <IconBtn
-            label="Delete"
-            disabled={disabled}
-            onClick={onDelete}
-          >
-            ×
-          </IconBtn>
+        <div className="mt-2">
+          {editing ? (
+            <div className="space-y-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={3}
+                className="w-full border border-ink bg-canvas px-3 py-2 text-[14px] leading-relaxed font-sans outline-none"
+              />
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => {
+                    onSave(draft);
+                    setEditing(false);
+                  }}
+                  className="border border-ink bg-ink px-3 py-1 text-[11px] font-medium text-canvas hover:bg-accent hover:border-accent disabled:opacity-50"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(question.prompt);
+                    setEditing(false);
+                  }}
+                  className="text-[11px] text-ink-muted ink-link"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="block w-full text-left font-sans text-[15px] leading-relaxed text-ink transition-colors hover:text-accent"
+            >
+              {question.prompt}
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="mt-3">
-        {editing ? (
-          <div className="space-y-2">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              rows={3}
-              className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-900 focus:ring-2 dark:border-zinc-800 dark:bg-zinc-950"
-            />
-            <div className="flex gap-2">
-              <button
-                type="button"
-                disabled={disabled}
-                onClick={() => {
-                  onSave(draft);
-                  setEditing(false);
-                }}
-                className="rounded-md bg-zinc-900 px-3 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(question.prompt);
-                  setEditing(false);
-                }}
-                className="rounded-md border border-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setEditing(true)}
-            className="block w-full text-left text-sm leading-relaxed text-zinc-800 hover:text-zinc-950 dark:text-zinc-200 dark:hover:text-white"
-          >
-            {question.prompt}
-          </button>
-        )}
+      <div className="col-span-1 flex flex-col items-end gap-1 text-ink-muted">
+        <IconBtn
+          label="Move up"
+          disabled={disabled || isFirst}
+          onClick={() => onMove("up")}
+        >
+          ↑
+        </IconBtn>
+        <IconBtn
+          label="Move down"
+          disabled={disabled || isLast}
+          onClick={() => onMove("down")}
+        >
+          ↓
+        </IconBtn>
+        <IconBtn label="Delete" disabled={disabled} onClick={onDelete}>
+          ×
+        </IconBtn>
       </div>
     </li>
   );
@@ -269,7 +269,7 @@ function IconBtn({
       title={label}
       disabled={disabled}
       onClick={onClick}
-      className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-30 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+      className="flex h-6 w-6 items-center justify-center text-[14px] transition-colors hover:text-accent disabled:cursor-not-allowed disabled:opacity-30"
     >
       {children}
     </button>

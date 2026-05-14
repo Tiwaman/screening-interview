@@ -17,37 +17,33 @@ export function IntakeForm() {
   );
 
   return (
-    <form action={formAction} className="space-y-6">
-      <div className="space-y-2">
-        <label
-          htmlFor="role_title"
-          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
-        >
-          Role title <span className="text-red-500">*</span>
-        </label>
+    <form action={formAction} className="space-y-8">
+      <Field
+        label="Role title"
+        hint="Pick the role being interviewed for."
+        required
+      >
         <input
           id="role_title"
           name="role_title"
           type="text"
           required
-          placeholder="e.g. Senior Backend Engineer"
-          className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-900 focus:ring-2 dark:border-zinc-800 dark:bg-zinc-950"
+          placeholder="Senior Backend Engineer"
+          className="w-full border-0 border-b-2 border-ink bg-transparent pb-2 text-[20px] font-display outline-none placeholder:text-ink-muted/50 focus:border-accent"
         />
-      </div>
+      </Field>
 
-      <div className="space-y-2">
-        <label
-          htmlFor="seniority"
-          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
-        >
-          Seniority <span className="text-red-500">*</span>
-        </label>
+      <Field
+        label="Seniority"
+        hint="Sets the bar for evaluation."
+        required
+      >
         <select
           id="seniority"
           name="seniority"
           required
           defaultValue=""
-          className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-900 focus:ring-2 dark:border-zinc-800 dark:bg-zinc-950"
+          className="w-full border-0 border-b-2 border-ink bg-transparent pb-2 text-[20px] font-display outline-none focus:border-accent"
         >
           <option value="" disabled>
             Select level…
@@ -58,65 +54,89 @@ export function IntakeForm() {
             </option>
           ))}
         </select>
-      </div>
+      </Field>
 
-      <div className="space-y-2">
-        <label
-          htmlFor="jd_text"
-          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
-        >
-          Job description{" "}
-          <span className="text-xs font-normal text-zinc-500">(optional)</span>
-        </label>
+      <Field
+        label="Job description"
+        hint="Paste or skip. Adding it sharpens role-specific questions."
+        optional
+      >
         <textarea
           id="jd_text"
           name="jd_text"
           rows={8}
-          placeholder="Paste the JD here. Improves question quality but not required."
-          className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm outline-none ring-zinc-900 focus:ring-2 dark:border-zinc-800 dark:bg-zinc-950"
+          placeholder="Paste the JD…"
+          className="w-full border border-rule bg-canvas-deep/30 px-3 py-3 text-[14px] leading-relaxed font-sans outline-none placeholder:text-ink-muted/50 focus:border-ink focus:bg-canvas"
         />
-      </div>
+      </Field>
 
-      <div className="space-y-2">
-        <label
-          htmlFor="resume"
-          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
-        >
-          Candidate resume{" "}
-          <span className="text-xs font-normal text-zinc-500">
-            (optional, PDF / DOCX / TXT, max 8MB)
-          </span>
-        </label>
+      <Field
+        label="Candidate resume"
+        hint="PDF, DOCX, or TXT. Max 8MB. Optional — adding it surfaces resume-probe questions."
+        optional
+      >
         <input
           id="resume"
           name="resume"
           type="file"
           accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
-          className="block w-full text-sm text-zinc-700 file:mr-3 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-zinc-900 hover:file:bg-zinc-200 dark:text-zinc-300 dark:file:bg-zinc-800 dark:file:text-zinc-100 dark:hover:file:bg-zinc-700"
+          className="block w-full text-sm text-ink file:mr-3 file:border-0 file:bg-ink file:px-4 file:py-2 file:text-[12px] file:font-medium file:text-canvas hover:file:bg-accent file:transition-colors"
         />
-      </div>
+      </Field>
 
       {state.error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
+        <div className="border-l-2 border-accent bg-canvas-deep/40 p-3 text-[13px] text-accent">
           {state.error}
         </div>
       )}
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-baseline gap-6 border-t border-rule pt-6">
         <button
           type="submit"
           disabled={pending}
-          className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+          className="border border-ink bg-ink px-6 py-2.5 text-[13px] font-medium text-canvas transition-colors hover:bg-accent hover:border-accent disabled:opacity-50"
         >
-          {pending ? "Creating…" : "Create interview"}
+          {pending ? "Creating…" : "Create interview →"}
         </button>
         <Link
           href="/dashboard"
-          className="text-sm text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+          className="text-[12px] text-ink-muted ink-link"
         >
           Cancel
         </Link>
       </div>
     </form>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  required,
+  optional,
+  children,
+}: {
+  label: string;
+  hint: string;
+  required?: boolean;
+  optional?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <p className="eyebrow">
+          {label}
+          {required && <span className="text-accent"> *</span>}
+        </p>
+        {optional && (
+          <span className="text-[10px] uppercase tracking-wide text-ink-muted/70">
+            Optional
+          </span>
+        )}
+      </div>
+      {children}
+      <p className="text-[11px] italic text-ink-muted">{hint}</p>
+    </div>
   );
 }
